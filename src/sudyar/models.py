@@ -121,6 +121,18 @@ class FloorSetting(Base):
     min_profit_toman: Mapped[int | None] = mapped_column(BigInteger)
     floor_manual_toman: Mapped[int | None] = mapped_column(BigInteger)
     floor_manual_pct: Mapped[float | None] = mapped_column(Float)  # % of our current price
+    # Manual cost components (no Digikala endpoint exists for them). Each is a % of price and/or a
+    # fixed Toman amount; unset (NULL) = NOT included, and reports say so.
+    fulfillment_pct: Mapped[float | None] = mapped_column(Float)
+    fulfillment_toman: Mapped[int | None] = mapped_column(BigInteger)
+    tax_pct: Mapped[float | None] = mapped_column(Float)
+    tax_toman: Mapped[int | None] = mapped_column(BigInteger)
+    ad_share_pct: Mapped[float | None] = mapped_column(Float)
+    ad_share_toman: Mapped[int | None] = mapped_column(BigInteger)
+    return_reserve_pct: Mapped[float | None] = mapped_column(Float)
+    return_reserve_toman: Mapped[int | None] = mapped_column(BigInteger)
+    packaging_pct: Mapped[float | None] = mapped_column(Float)
+    packaging_toman: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class FloorEvent(Base):
@@ -143,4 +155,46 @@ class FeeCache(Base):
 
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     data: Mapped[dict] = mapped_column(JSON)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Commission(Base):
+    """One row of GET /open-api/v1/commissions/. `commission` etc. are FRACTIONS (0.03 = 3%)."""
+
+    __tablename__ = "commissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    main_category_id: Mapped[str | None] = mapped_column(String(64))
+    category_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    brand_id: Mapped[str | None] = mapped_column(String(64))
+    brand_title: Mapped[str | None] = mapped_column(String(300))
+    commission: Mapped[float | None] = mapped_column(Float)
+    extra_commission: Mapped[float | None] = mapped_column(Float)
+    return_free_commission: Mapped[float | None] = mapped_column(Float)
+    current_lead_time: Mapped[int | None] = mapped_column(Integer)  # API field: currentLeadTime
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class VariantBrand(Base):
+    """Manual brand_id (taken from commissions) for a variant. Variants carry no brand field."""
+
+    __tablename__ = "variant_brands"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    brand_id: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProductSales(Base):
+    """GET /open-api/v1/insight/sales-reports items, per product_id and range."""
+
+    __tablename__ = "product_sales"
+
+    product_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    range: Mapped[str] = mapped_column(String(32), primary_key=True)
+    net_item_sold: Mapped[int | None] = mapped_column(Integer)
+    net_sales_amount: Mapped[int | None] = mapped_column(BigInteger)  # unit as returned (unverified)
+    order_count: Mapped[int | None] = mapped_column(Integer)
+    visit_count: Mapped[int | None] = mapped_column(Integer)
+    conversion_rate: Mapped[float | None] = mapped_column(Float)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

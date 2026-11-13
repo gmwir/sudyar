@@ -169,7 +169,7 @@ class Radar:
         for etype, old, new in detected:
             details: dict[str, Any] = {
                 "title": data["title"], "our_price": data["price_sale"], "buy_box_price": data["buy_box_price"],
-                "price_unit": "unverified",
+                "price_unit": self.s.price_unit, "suggested_price_unit": self.s.suggested_price_unit,
             }
             if etype == BUYBOX_LOST:
                 details.update(determine_cause(data))

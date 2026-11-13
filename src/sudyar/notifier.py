@@ -56,38 +56,69 @@ FLOOR_LABEL_FA = {
 }
 
 
+COMP_FA = {"fulfillment": "پردازش/ارسال", "tax": "مالیات", "ad_share": "تبلیغات",
+           "return_reserve": "مرجوعی", "packaging": "بسته‌بندی"}
+
+
+def _toman(v, unit: str | None):
+    """Price in the API unit -> Toman (Rial / 10). None if the unit is not known."""
+    if v is None or unit not in ("rial", "toman"):
+        return None
+    return round(v / 10) if unit == "rial" else round(v)
+
+
 def _floor_lines(d: dict) -> str:
     f = d.get("floor")
     if not f:
         return ""
     floor = f.get("floor_toman")
     win = f.get("win_price_toman")
-    return (f"\nکف قیمت: {_n(floor)} تومان"
-            f"\nقیمت لازم برای برد: {_n(None if win is None else int(win))} تومان"
-            f"\nارزیابی: {FLOOR_LABEL_FA.get(f.get('label'), UNKNOWN_FA)}"
-            "\nفقط پیشنهاد است؛ هیچ قیمتی تغییر نمی‌کند.")
+    out = (f"\nکف قیمت: {_n(floor)} تومان"
+           f"\nقیمت لازم برای برد: {_n(None if win is None else int(win))} تومان"
+           f"\nارزیابی: {FLOOR_LABEL_FA.get(f.get('label'), UNKNOWN_FA)}")
+    if f.get("fee_reason") == "fee_assumed_max_brand":
+        out += "\nکمیسیون: بیشترین مقدار برندهای این دسته (برند مشخص نیست)"
+    unset = [COMP_FA[c] for c in f.get("unset_components") or [] if c in COMP_FA]
+    if unset and f.get("floor_toman") is not None:
+        out += "\nهزینه‌های تنظیم‌نشده (صفر حساب شده): " + "، ".join(unset)
+    return out + "\nفقط پیشنهاد است؛ هیچ قیمتی تغییر نمی‌کند."
 
 
 def render_message(ev: RadarEvent) -> str:
     d = ev.details or {}
+    pu = d.get("price_unit")
+    known = pu in ("rial", "toman")  # unit known -> every price is shown in TOMAN
     title = d.get("title") or UNKNOWN_FA
     head = f"کالا: {title}"
-    prices = f"قیمت ما: {_n(d.get('our_price'))}\nقیمت باکس خرید: {_n(d.get('buy_box_price'))}"
-    unit = "(واحد قیمت‌ها هنوز تأیید نشده)"
+    if known:
+        our, bb = _toman(d.get("our_price"), pu), _toman(d.get("buy_box_price"), pu)
+        prices = f"قیمت ما: {_n(our)} تومان\nقیمت باکس خرید: {_n(bb)} تومان"
+        gap = f"{_n(_toman(d.get('gap_abs'), pu))} تومان"
+        sug = _toman(d.get("suggested_price"), d.get("suggested_price_unit", "rial"))
+        sug_txt = f"{_n(sug)} تومان"
+        unit = ""
+    else:  # old events without a known unit
+        prices = f"قیمت ما: {_n(d.get('our_price'))}\nقیمت باکس خرید: {_n(d.get('buy_box_price'))}"
+        gap = _n(d.get("gap_abs"))
+        sug_txt = _n(d.get("suggested_price"))
+        unit = "\n(واحد قیمت‌ها هنوز تأیید نشده)"
     t = ev.type
     if t == "BUYBOX_LOST":
         return (f"🔴 باکس خرید را از دست دادید\n{head}\n{prices}\n"
-                f"فاصله: {_pct(d.get('gap_pct'))} ({_n(d.get('gap_abs'))})\n"
-                f"قیمت پیشنهادی: {_n(d.get('suggested_price'))}\n"
-                f"علت: {CAUSE_FA.get(d.get('cause', 'unknown'), UNKNOWN_FA)}{_floor_lines(d)}\n{unit}")
+                f"فاصله: {_pct(d.get('gap_pct'))} ({gap})\n"
+                f"قیمت پیشنهادی: {sug_txt}\n"
+                f"علت: {CAUSE_FA.get(d.get('cause', 'unknown'), UNKNOWN_FA)}{_floor_lines(d)}{unit}")
     if t == "BUYBOX_REGAINED":
-        return f"🟢 باکس خرید را پس گرفتید\n{head}\n{prices}\n{unit}"
+        return f"🟢 باکس خرید را پس گرفتید\n{head}\n{prices}{unit}"
     if t == "ENTERED_CHALLENGE":
-        return f"🟠 کالا وارد رقابت باکس خرید شد\n{head}\n{prices}\n{unit}"
+        return f"🟠 کالا وارد رقابت باکس خرید شد\n{head}\n{prices}{unit}"
     if t == "LEFT_CHALLENGE":
-        return f"⚪ کالا از رقابت باکس خرید خارج شد\n{head}\n{prices}\n{unit}"
+        return f"⚪ کالا از رقابت باکس خرید خارج شد\n{head}\n{prices}{unit}"
     if t == "PRICE_CHANGED":
-        return f"💲 قیمت ما تغییر کرد\n{head}\nقبلی: {_n(int(ev.old_value))} ← جدید: {_n(int(ev.new_value))}\n{unit}"
+        old, new = int(ev.old_value), int(ev.new_value)
+        if known:
+            return f"💲 قیمت ما تغییر کرد\n{head}\nقبلی: {_n(_toman(old, pu))} ← جدید: {_n(_toman(new, pu))} تومان"
+        return f"💲 قیمت ما تغییر کرد\n{head}\nقبلی: {_n(old)} ← جدید: {_n(new)}{unit}"
     if t == "STOCK_OUT":
         return f"📦 موجودی تمام شد\n{head}"
     if t == "STOCK_BACK":

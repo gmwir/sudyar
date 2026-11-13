@@ -12,6 +12,8 @@ from .rate_limiter import ApiError, RateLimiter
 
 log = logging.getLogger(__name__)
 
+SALES_RANGES = ("last_7_days", "last_14_days", "last_30_days")
+
 # Called for every API attempt: (endpoint, http_status_or_None, seconds)
 CallLogger = Callable[[str, int | None, float], None]
 
@@ -78,19 +80,50 @@ class DigikalaClient:
     async def get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         return await self._request("GET", path, params)
 
-    async def get_variants_page(self, page: int) -> tuple[list[dict[str, Any]], int | None]:
-        """One page of variants -> (items, total_pages or None if the response has no pager)."""
+    async def get_page(self, path: str, params: dict[str, Any]) -> tuple[list[dict[str, Any]], int | None]:
+        """One GET -> (items at data.items, total_pages from data.pager or None)."""
         s = self.settings
-        if not s.variants_path:
-            raise ApiError("DIGIKALA_VARIANTS_PATH is not set.")
-        params = {**s.variants_extra_params, s.page_param: page, s.page_size_param: s.page_size}
-        data = await self.get(s.variants_path, params)
+        data = await self.get(path, params)
         items = _dig(data, s.items_key)
         if not isinstance(items, list):
             raise ApiError(f"Response has no list at '{s.items_key}'.")
         pager = _dig(data, s.pager_key)
         total = pager.get("total_pages") if isinstance(pager, dict) else None
         return items, total if isinstance(total, int) else None
+
+    async def get_variants_page(self, page: int) -> tuple[list[dict[str, Any]], int | None]:
+        """One page of variants -> (items, total_pages or None if the response has no pager)."""
+        s = self.settings
+        if not s.variants_path:
+            raise ApiError("DIGIKALA_VARIANTS_PATH is not set.")
+        params = {**s.variants_extra_params, s.page_param: page, s.page_size_param: s.page_size}
+        return await self.get_page(s.variants_path, params)
+
+    async def get_commissions_page(self, page: int) -> tuple[list[dict[str, Any]], int | None]:
+        """GET /open-api/v1/commissions/ (scope: commission). Params: page, size, sort=id."""
+        s = self.settings
+        params: dict[str, Any] = {s.page_param: page, s.page_size_param: s.page_size, "sort": "id"}
+        if s.fees_only_my_commissions:  # UNVERIFIED semantics: only sent when you turn it on
+            params["search[my_commissions]"] = 1
+        if s.fees_main_category_id:
+            params["search[main_category_id]"] = s.fees_main_category_id
+        return await self.get_page(s.commissions_path, params)
+
+    async def get_sales_report_page(self, range_: str, page: int | None = None,
+                                    category_id: str | None = None) -> tuple[list[dict[str, Any]], int | None]:
+        """GET /open-api/v1/insight/sales-reports (scope: insight). `range` is required.
+
+        page/size are only sent for page 2+ (the Swagger lists no paging params for this endpoint).
+        """
+        if range_ not in SALES_RANGES:
+            raise ValueError(f"range must be one of {', '.join(SALES_RANGES)}")
+        params: dict[str, Any] = {"range": range_}
+        if category_id:
+            params["category_id"] = category_id
+        if page is not None and page > 1:
+            params[self.settings.page_param] = page
+            params[self.settings.page_size_param] = self.settings.page_size
+        return await self.get_page(self.settings.sales_reports_path, params)
 
     async def list_variants(self, max_pages: int = 10_000) -> AsyncIterator[dict[str, Any]]:
         """Yield every variant (raw dict), page by page."""

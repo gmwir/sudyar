@@ -1,14 +1,14 @@
 """Profit-floor engine. READ-ONLY toward Digikala; it only ever *suggests*, never changes a price.
 
-net_profit = price - (buy_cost + commission + fulfillment/processing + tax + ad_share
-                      + return_reserve + packaging)
+net_profit = price - (buy_cost + commission + fulfillment + tax + ad_share + return_reserve + packaging)
 
-Nothing is guessed:
-- commission / fulfillment / tax come from Digikala read endpoints (GET), cached in fee_cache;
-  if they are not available the status is "needs_fees".
-- buy_cost comes from our own import / manual entry; missing -> manual floor, else "needs_cost".
-- ad_share / return_reserve / packaging are YOUR settings (default 0 = not applied).
-- the price unit (rial/toman) must be set by you; while unknown -> "needs_unit".
+Where each number comes from (nothing is guessed):
+- commission: Digikala GET /commissions/ (the `commission` fraction), see fees.py.
+- buy_cost: our own import / manual entry (Toman). Missing -> manual floor, else "needs_cost".
+- fulfillment, tax, ad_share, return_reserve, packaging: NO Digikala endpoint exists for them, so they
+  are explicit manual settings (% of price and/or Toman) in floor_settings. Unset = NOT included,
+  and every report/alert says so.
+- UNITS: Digikala prices are RIAL. All floor math is in TOMAN (rial / 10). Names say which is which.
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import FeeCache, FloorEvent, FloorSetting, Variant, VariantCost
+from .fees import FeeProvider, Fees
+from .models import FloorEvent, FloorSetting, Variant, VariantBrand, VariantCost
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +39,12 @@ NEED_BELOW = "would_need_below_floor"
 UNKNOWN = "unknown"
 
 SCOPES = ("variant", "brand", "category", "global")  # precedence, most specific first
+COMPONENTS = ("fulfillment", "tax", "ad_share", "return_reserve", "packaging")
 
 
 # ---------- units ----------
 def to_toman(value: float | int | None, unit: str) -> float | None:
-    """Rial -> Toman is /10. Unit 'unknown' (or anything else) -> None: we refuse to guess."""
+    """Convert a price in `unit` (rial|toman) to Toman. Rial -> Toman is /10. Other unit -> None."""
     if value is None:
         return None
     if unit == "toman":
@@ -52,165 +54,93 @@ def to_toman(value: float | int | None, unit: str) -> float | None:
     return None
 
 
-# ---------- fees ----------
-FEE_FIELDS = ("commission_pct", "commission_fixed", "fulfillment_pct", "fulfillment_fixed", "tax_pct")
-
-
+# ---------- cost components (manual) ----------
 @dataclass(frozen=True)
-class Fees:
-    """Percent fields are % of the selling price; *_fixed are amounts in the PRICE unit."""
-
-    commission_pct: float | None = None
-    commission_fixed: float | None = None
-    fulfillment_pct: float | None = None
-    fulfillment_fixed: float | None = None
-    tax_pct: float | None = None
+class Components:
+    pct: dict[str, float | None] = field(default_factory=dict)  # % of selling price
+    toman: dict[str, float | None] = field(default_factory=dict)  # fixed Toman per unit
 
     @property
-    def has_commission(self) -> bool:
-        return self.commission_pct is not None or self.commission_fixed is not None
+    def total_pct(self) -> float:
+        return sum(v or 0 for v in self.pct.values())
 
     @property
-    def missing(self) -> list[str]:
-        return [f for f in FEE_FIELDS if getattr(self, f) is None]
+    def total_toman(self) -> float:
+        return sum(v or 0 for v in self.toman.values())
 
-    def to_dict(self) -> dict[str, float | None]:
-        return {f: getattr(self, f) for f in FEE_FIELDS}
+    @property
+    def included(self) -> list[str]:
+        return [c for c in COMPONENTS if self.pct.get(c) is not None or self.toman.get(c) is not None]
 
-
-@dataclass(frozen=True)
-class Extras:
-    """Costs Digikala does not report. Set by the user; 0 = not applied."""
-
-    ad_share_pct: float = 0.0
-    return_reserve_pct: float = 0.0
-    packaging_toman: float = 0.0
-
-    @classmethod
-    def from_settings(cls, s: Settings) -> "Extras":
-        return cls(s.cost_ad_share_pct, s.cost_return_reserve_pct, s.cost_packaging_toman)
+    @property
+    def unset(self) -> list[str]:
+        return [c for c in COMPONENTS if c not in self.included]
 
 
-def _split(buy_cost: float, fees: Fees, extras: Extras, fixed_toman) -> tuple[float, float]:
-    """(variable share of price, fixed costs in toman). fixed_toman converts price-unit amounts."""
-    var = sum((fees.commission_pct or 0, fees.fulfillment_pct or 0, fees.tax_pct or 0,
-               extras.ad_share_pct, extras.return_reserve_pct)) / 100
-    fixed = buy_cost + extras.packaging_toman
-    fixed += fixed_toman(fees.commission_fixed or 0) + fixed_toman(fees.fulfillment_fixed or 0)
-    return var, fixed
+NO_COMPONENTS = Components()
 
 
-def net_profit(price_toman: float, buy_cost: float, fees: Fees, extras: Extras, fixed_toman=lambda x: x) -> float:
-    var, fixed = _split(buy_cost, fees, extras, fixed_toman)
-    return price_toman * (1 - var) - fixed
+# ---------- math (all in Toman) ----------
+def net_profit(price_toman: float, buy_cost_toman: float, commission_pct: float,
+               comps: Components = NO_COMPONENTS) -> float:
+    var = (commission_pct + comps.total_pct) / 100
+    return price_toman * (1 - var) - (buy_cost_toman + comps.total_toman)
 
 
-def compute_floor(buy_cost: float, fees: Fees, extras: Extras, margin_pct: float | None,
-                  min_profit: float | None, fixed_toman=lambda x: x) -> tuple[int | None, str]:
-    """Smallest price (toman) with profit >= max(min_profit, margin% of price). None if impossible."""
-    if margin_pct is None and min_profit is None:
+def compute_floor(buy_cost_toman: float, commission_pct: float, comps: Components, margin_pct: float | None,
+                  min_profit_toman: float | None) -> tuple[int | None, str]:
+    """Smallest price (Toman) with profit >= max(min_profit, margin% of price). None if impossible."""
+    if margin_pct is None and min_profit_toman is None:
         return None, "no_margin_or_min_profit"
-    var, fixed = _split(buy_cost, fees, extras, fixed_toman)
+    var = (commission_pct + comps.total_pct) / 100
+    fixed = buy_cost_toman + comps.total_toman
     m = (margin_pct or 0) / 100
     if 1 - var <= 0 or 1 - var - m <= 0:
         return None, "margin_impossible"
     need = fixed / (1 - var - m)
-    if min_profit is not None:
-        need = max(need, (fixed + min_profit) / (1 - var))
+    if min_profit_toman is not None:
+        need = max(need, (fixed + min_profit_toman) / (1 - var))
     return math.ceil(need - 1e-9), "computed"
-
-
-# ---------- fee provider (Digikala GET endpoints, cached) ----------
-def _dig(data: Any, dotted: str) -> Any:
-    for part in dotted.split("."):
-        if not isinstance(data, dict):
-            return None
-        data = data.get(part)
-    return data
-
-
-def _num(v: Any) -> float | None:
-    try:
-        return None if v is None else float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_fees(responses: dict[str, Any], field_map: dict[str, str]) -> Fees:
-    """field_map value: 'source:dotted.path' (source = commissions | calculator)."""
-    vals: dict[str, float | None] = {}
-    for f in FEE_FIELDS:
-        spec = field_map.get(f)
-        if not spec:
-            vals[f] = None
-            continue
-        src, _, path = spec.rpartition(":")
-        vals[f] = _num(_dig(responses.get(src or "commissions"), path))
-    return Fees(**vals)
-
-
-class FeeProvider:
-    enabled_message = "Fee endpoints are not configured (FEES_* in .env, from the Swagger)."
-
-    def __init__(self, client, settings: Settings):
-        self.client, self.s = client, settings
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.s.fees_field_map and (self.s.fees_commission_path or self.s.fees_calculator_path))
-
-    async def get(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool = True) -> Fees | None:
-        """Fees for a variant from cache or Digikala (GET). None = unavailable (never guessed)."""
-        key = variant.product_variant_id
-        if not key:
-            return None
-        row = session.get(FeeCache, key)
-        if row is not None:
-            age = (now - _aware(row.fetched_at)).total_seconds()
-            if age < self.s.fees_cache_seconds:
-                return Fees(**row.data)
-        if not (allow_fetch and self.enabled and self.client is not None):
-            return None  # missing or stale and we may not fetch
-        try:
-            responses: dict[str, Any] = {}
-            ctx = {"product_variant_id": key, "price": variant.price_sale if variant.price_sale is not None else ""}
-            params = {k: str(v).format(**ctx) for k, v in self.s.fees_params.items()}
-            if self.s.fees_commission_path:
-                responses["commissions"] = await self.client.get(self.s.fees_commission_path, params)
-            if self.s.fees_calculator_path:
-                responses["calculator"] = await self.client.get(self.s.fees_calculator_path, params)
-        except Exception as e:  # never break a cycle / report; message type only (no URL/headers)
-            log.warning("fee lookup failed: %s", type(e).__name__)
-            return None
-        fees = parse_fees(responses, self.s.fees_field_map)
-        if row is None:
-            session.add(FeeCache(key=key, data=fees.to_dict(), fetched_at=now))
-        else:
-            row.data, row.fetched_at = fees.to_dict(), now
-        session.flush()
-        return fees
-
-
-def _aware(dt: datetime) -> datetime:
-    from datetime import timezone
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 # ---------- rule resolution ----------
 def _field(raw: dict | None, dotted: str) -> str | None:
     if not dotted or not raw:
         return None
-    v = _dig(raw, dotted)
-    return None if v is None or isinstance(v, (dict, list)) else str(v)
+    v: Any = raw
+    for part in dotted.split("."):
+        if not isinstance(v, dict):
+            return None
+        v = v.get(part)
+    return None if v is None or isinstance(v, (dict, list, bool)) else str(v)
 
 
-def scope_keys(variant: Variant, s: Settings) -> dict[str, str | None]:
+def variant_brand_id(session: Session, variant: Variant) -> str | None:
+    """Brand only if the user set it manually (variants carry no brand field)."""
+    row = session.get(VariantBrand, variant.id)
+    return row.brand_id if row else None
+
+
+def scope_keys(session: Session, variant: Variant, s: Settings) -> dict[str, str | None]:
     return {
         "variant": variant.digikala_variant_id,
-        "brand": _field(variant.raw_json, s.floor_brand_field),
+        "brand": variant_brand_id(session, variant),
         "category": _field(variant.raw_json, s.floor_category_field),
         "global": "",
     }
+
+
+def _scope_rows(session: Session, variant: Variant, s: Settings) -> list[FloorSetting]:
+    keys = scope_keys(session, variant, s)
+    out = []
+    for scope in SCOPES:
+        if keys[scope] is None:
+            continue
+        row = session.scalar(select(FloorSetting).where(FloorSetting.scope == scope,
+                                                        FloorSetting.scope_key == keys[scope]))
+        if row is not None:
+            out.append(row)
+    return out
 
 
 def _has_rule(r: FloorSetting) -> bool:
@@ -218,16 +148,22 @@ def _has_rule(r: FloorSetting) -> bool:
 
 
 def resolve_setting(session: Session, variant: Variant, s: Settings) -> FloorSetting | None:
-    """Precedence variant > brand > category > global; rows that set nothing are skipped."""
-    keys = scope_keys(variant, s)
-    for scope in SCOPES:
-        key = keys[scope]
-        if key is None:
-            continue
-        row = session.scalar(select(FloorSetting).where(FloorSetting.scope == scope, FloorSetting.scope_key == key))
-        if row is not None and _has_rule(row):
+    """Margin / minimum profit / manual floor: variant > brand > category > global (rows setting none are skipped)."""
+    for row in _scope_rows(session, variant, s):
+        if _has_rule(row):
             return row
     return None
+
+
+def resolve_components(session: Session, variant: Variant, s: Settings) -> Components:
+    """Each cost component is looked up on its own, most specific scope first."""
+    rows = _scope_rows(session, variant, s)
+    pct: dict[str, float | None] = {}
+    toman: dict[str, float | None] = {}
+    for c in COMPONENTS:
+        pct[c] = next((getattr(r, f"{c}_pct") for r in rows if getattr(r, f"{c}_pct") is not None), None)
+        toman[c] = next((getattr(r, f"{c}_toman") for r in rows if getattr(r, f"{c}_toman") is not None), None)
+    return Components(pct, toman)
 
 
 # ---------- evaluation ----------
@@ -235,26 +171,29 @@ def resolve_setting(session: Session, variant: Variant, s: Settings) -> FloorSet
 class FloorResult:
     status: str
     floor_toman: int | None = None  # effective floor
-    computed_floor_toman: int | None = None  # from cost + fees + margin
+    computed_floor_toman: int | None = None  # from cost + commission + components + margin
     reason: str = ""
     scope: str | None = None
-    fees_missing: list[str] = field(default_factory=list)
+    fee_reason: str | None = None  # fee_category_row | fee_brand_row | fee_assumed_max_brand
+    commission_pct: float | None = None
+    included_components: list[str] = field(default_factory=list)
+    unset_components: list[str] = field(default_factory=list)
 
     def as_details(self) -> dict[str, Any]:
         return {"status": self.status, "floor_toman": self.floor_toman,
-                "computed_floor_toman": self.computed_floor_toman, "reason": self.reason, "scope": self.scope}
+                "computed_floor_toman": self.computed_floor_toman, "reason": self.reason, "scope": self.scope,
+                "fee_reason": self.fee_reason, "commission_pct": self.commission_pct,
+                "unset_components": self.unset_components}
 
 
 class FloorEngine:
     def __init__(self, settings: Settings, fee_provider: FeeProvider | None = None):
         self.s = settings
         self.fees = fee_provider or FeeProvider(None, settings)
-        self.extras = Extras.from_settings(settings)
 
-    def _fixed_converter(self):
-        """Fixed fee amounts are in the price unit. Unknown unit -> None (refuse)."""
-        unit = self.s.price_unit
-        return lambda x: x if x == 0 else to_toman(x, unit)
+    async def _fees_for(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool) -> Fees | None:
+        category = _field(variant.raw_json, self.s.floor_category_field)
+        return await self.fees.get(session, category, variant_brand_id(session, variant), now, allow_fetch)
 
     async def evaluate(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool = True) -> FloorResult:
         setting = resolve_setting(session, variant, self.s)
@@ -266,9 +205,9 @@ class FloorEngine:
         if setting.floor_manual_toman is not None:
             manual.append(setting.floor_manual_toman)
         if setting.floor_manual_pct is not None:
-            cur = to_toman(variant.price_sale, self.s.price_unit)
-            if cur is not None:
-                manual.append(math.ceil(cur * setting.floor_manual_pct / 100))
+            cur_toman = to_toman(variant.price_sale, self.s.price_unit)
+            if cur_toman is not None:
+                manual.append(math.ceil(cur_toman * setting.floor_manual_pct / 100))
             elif setting.floor_manual_toman is None:
                 return FloorResult(NEEDS_UNIT, reason="manual % floor needs DIGIKALA_PRICE_UNIT", scope=setting.scope)
         manual_floor = max(manual) if manual else None
@@ -277,38 +216,36 @@ class FloorEngine:
             if manual_floor is not None:
                 return FloorResult(OK, manual_floor, None, "manual_floor_no_cost", setting.scope)
             return FloorResult(NEEDS_COST, reason="buy_cost missing", scope=setting.scope)
-
         if setting.margin_pct is None and setting.min_profit_toman is None:
             if manual_floor is not None:
                 return FloorResult(OK, manual_floor, None, "manual_floor", setting.scope)
             return FloorResult(NO_RULE, reason="rule has no margin/min profit", scope=setting.scope)
 
-        fees = await self.fees.get(session, variant, now, allow_fetch)
-        if fees is None or not fees.has_commission:
-            return FloorResult(NEEDS_FEES, reason="commission not available from Digikala", scope=setting.scope)
-        conv = self._fixed_converter()
-        if conv(fees.commission_fixed or 0) is None or conv(fees.fulfillment_fixed or 0) is None:
-            return FloorResult(NEEDS_UNIT, reason="fixed fees need DIGIKALA_PRICE_UNIT", scope=setting.scope)
-        computed, why = compute_floor(cost, fees, self.extras, setting.margin_pct, setting.min_profit_toman, conv)
+        fees = await self._fees_for(session, variant, now, allow_fetch)
+        if fees is None:
+            return FloorResult(NEEDS_FEES, reason="no commission row for this variant's category (run sync-fees)",
+                               scope=setting.scope)
+        comps = resolve_components(session, variant, self.s)
+        computed, why = compute_floor(cost, fees.commission_pct, comps, setting.margin_pct, setting.min_profit_toman)
+        base = dict(scope=setting.scope, fee_reason=fees.reason, commission_pct=fees.commission_pct,
+                    included_components=comps.included, unset_components=comps.unset)
         if computed is None:
-            return FloorResult(IMPOSSIBLE, reason=why, scope=setting.scope, fees_missing=fees.missing)
+            return FloorResult(IMPOSSIBLE, reason=why, **base)
         effective = max(computed, manual_floor or 0)
         reason = "computed" if effective == computed else "manual_floor_higher"
-        return FloorResult(OK, effective, computed, reason, setting.scope, fees.missing)
+        return FloorResult(OK, effective, computed, reason, **base)
 
     async def profit_now(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool = False) -> float | None:
-        """Net profit at our current price (toman). None unless cost, fees and unit are all known."""
+        """Net profit per unit at our current price, in Toman. None unless cost, commission and unit are known."""
         cost_row = session.get(VariantCost, variant.id)
         if cost_row is None or cost_row.buy_cost is None:
             return None
         price = to_toman(variant.price_sale, self.s.price_unit)
-        fees = await self.fees.get(session, variant, now, allow_fetch)
-        if price is None or fees is None or not fees.has_commission:
+        fees = await self._fees_for(session, variant, now, allow_fetch)
+        if price is None or fees is None:
             return None
-        conv = self._fixed_converter()
-        if conv(fees.commission_fixed or 0) is None or conv(fees.fulfillment_fixed or 0) is None:
-            return None
-        return net_profit(price, cost_row.buy_cost, fees, self.extras, conv)
+        comps = resolve_components(session, variant, self.s)
+        return net_profit(price, cost_row.buy_cost, fees.commission_pct, comps)
 
     def label(self, result: FloorResult, win_price_toman: float | None) -> str:
         if result.status != OK:
@@ -318,7 +255,7 @@ class FloorEngine:
         return CAN_WIN if win_price_toman >= result.floor_toman else NEED_BELOW
 
     def win_price_toman(self, suggested_price: int | None, buy_box_price: int | None) -> float | None:
-        """Price needed to win: Digikala's suggested price if we have it, else the Buy Box price."""
+        """Price needed to win, in Toman: Digikala's suggested price (Rial) if we have it, else the Buy Box price."""
         if suggested_price is not None:
             return to_toman(suggested_price, self.s.suggested_price_unit)
         return to_toman(buy_box_price, self.s.price_unit)
@@ -336,7 +273,10 @@ class FloorEngine:
 
 def record_floor_event(session: Session, variant: Variant, result: FloorResult, now: datetime) -> FloorEvent | None:
     """Insert a floor_events row only when floor / reason changed since the last one."""
-    reason = f"{result.status}:{result.reason}"[:200]
+    reason = f"{result.status}:{result.reason}"
+    if result.fee_reason:
+        reason += f"+{result.fee_reason}"
+    reason = reason[:200]
     last = session.scalar(select(FloorEvent).where(FloorEvent.variant_id == variant.id)
                           .order_by(FloorEvent.ts.desc(), FloorEvent.id.desc()).limit(1))
     if last and (last.floor, last.suggested_floor, last.reason) == (result.floor_toman, result.computed_floor_toman, reason):
@@ -348,27 +288,55 @@ def record_floor_event(session: Session, variant: Variant, result: FloorResult, 
     return ev
 
 
-def set_floor_rule(session: Session, scope: str, key: str = "", *, margin_pct=None, min_profit_toman=None,
-                   floor_manual_toman=None, floor_manual_pct=None) -> FloorSetting:
-    """Create/update one rule (idempotent). Only the values given are changed."""
+# ---------- writing OUR OWN settings (never Digikala) ----------
+RULE_FIELDS = ("margin_pct", "min_profit_toman", "floor_manual_toman", "floor_manual_pct")
+COMPONENT_FIELDS = tuple(f"{c}_{u}" for c in COMPONENTS for u in ("pct", "toman"))
+
+
+def set_floor_rule(session: Session, scope: str, key: str = "", **values: float | None) -> FloorSetting:
+    """Create/update one rule (idempotent). Only the values given are changed. Component scopes are
+    global/category (variant/brand also accepted). Unknown names are rejected."""
     if scope not in SCOPES:
         raise ValueError(f"scope must be one of {SCOPES}")
     if scope != "global" and not key:
-        raise ValueError(f"scope '{scope}' needs a key (variant id / brand / category)")
-    for name, v in (("margin_pct", margin_pct), ("min_profit_toman", min_profit_toman),
-                    ("floor_manual_toman", floor_manual_toman), ("floor_manual_pct", floor_manual_pct)):
+        raise ValueError(f"scope '{scope}' needs a key (variant id / brand_id / category_id)")
+    for name, v in values.items():
+        if name not in RULE_FIELDS + COMPONENT_FIELDS:
+            raise ValueError(f"unknown setting '{name}'")
         if v is not None and v < 0:
             raise ValueError(f"{name} must not be negative")
-    if margin_pct is not None and margin_pct >= 100:
+        if v is not None and name.endswith("_pct") and name != "floor_manual_pct" and v >= 100:
+            raise ValueError(f"{name} must be below 100")
+    if (values.get("margin_pct") or 0) >= 100:
         raise ValueError("margin_pct must be below 100")
-    key = "" if scope == "global" else key
+    key = "" if scope == "global" else str(key)
     row = session.scalar(select(FloorSetting).where(FloorSetting.scope == scope, FloorSetting.scope_key == key))
     if row is None:
         row = FloorSetting(scope=scope, scope_key=key)
         session.add(row)
-    for name, v in (("margin_pct", margin_pct), ("min_profit_toman", min_profit_toman),
-                    ("floor_manual_toman", floor_manual_toman), ("floor_manual_pct", floor_manual_pct)):
+    for name, v in values.items():
         if v is not None:
             setattr(row, name, v)
+    session.commit()
+    return row
+
+
+def set_variant_brand(session: Session, digikala_variant_id: str, brand_id: str, now: datetime | None = None) -> VariantBrand:
+    """Manual brand link; brand_id must exist in the synced commissions (run sync-fees first)."""
+    from .models import Commission, utcnow
+
+    v = session.scalar(select(Variant).where(Variant.digikala_variant_id == str(digikala_variant_id)))
+    if v is None:
+        raise ValueError(f"variant '{digikala_variant_id}' not found")
+    if session.scalar(select(Commission.id).limit(1)) is None:
+        raise ValueError("no commissions stored yet: run sync-fees first")
+    if session.scalar(select(Commission.id).where(Commission.brand_id == str(brand_id)).limit(1)) is None:
+        raise ValueError(f"brand_id '{brand_id}' not found in commissions (see list-brands)")
+    row = session.get(VariantBrand, v.id)
+    if row is None:
+        row = VariantBrand(variant_id=v.id, brand_id=str(brand_id), updated_at=now or utcnow())
+        session.add(row)
+    else:
+        row.brand_id, row.updated_at = str(brand_id), now or utcnow()
     session.commit()
     return row

@@ -1,293 +1,324 @@
 import math
 from datetime import datetime, timedelta, timezone
 
-import httpx
 import pytest
 from sqlalchemy import func, select
 
+from shapes import commission_item as ci
 from sudyar.config import Settings
-from sudyar.digikala_client import DigikalaClient
-from sudyar.floor import (CAN_WIN, NEED_BELOW, NEEDS_COST, NEEDS_FEES, NEEDS_UNIT, NO_RULE, OK, IMPOSSIBLE,
-                          Extras, FeeProvider, Fees, FloorEngine, compute_floor, net_profit, parse_fees,
-                          record_floor_event, resolve_setting, set_floor_rule, to_toman)
-from sudyar.models import FeeCache, FloorEvent, FloorSetting, Variant, VariantCost
+from sudyar.fees import FEE_ASSUMED_MAX_BRAND, FEE_BRAND_ROW, FeeProvider, parse_commission_row
+from sudyar.floor import (CAN_WIN, COMPONENTS, IMPOSSIBLE, NEED_BELOW, NEEDS_COST, NEEDS_FEES, NEEDS_UNIT, NO_RULE, OK,
+                          Components, FloorEngine, FloorResult, compute_floor, net_profit, record_floor_event,
+                          resolve_components, resolve_setting, set_floor_rule, set_variant_brand, to_toman)
+from sudyar.models import Commission, FeeCache, FloorEvent, FloorSetting, Variant, VariantBrand, VariantCost
 
 NOW = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-E0 = Extras()
 
 
-def mkvar(session, vid="1", price=1_000_000, pvid="9001", raw=None, **kw):
-    v = Variant(digikala_variant_id=vid, product_variant_id=pvid, price_sale=price, stock=5, active=True,
-                raw_json=raw or {}, **kw)
+def settings(**kw):
+    return Settings(**{"price_unit": "rial", **kw})
+
+
+def mkvar(session, vid="1", price_rial=10_000_000, category="101", pid="500", **kw):
+    v = Variant(digikala_variant_id=vid, product_variant_id=f"pv{vid}", product_id=pid, price_sale=price_rial,
+                stock=5, active=True, raw_json={"category_id": category, "supplier_code": f"S{vid}"}, **kw)
     session.add(v)
     session.flush()
     return v
 
 
-def settings(**kw):
-    base = dict(price_unit="toman", fees_field_map={"commission_pct": "commissions:data.pct"},
-                fees_commission_path="/fees/commissions")
-    base.update(kw)
-    return Settings(**base)
-
-
-def cache_fees(session, pvid="9001", **fees):
-    session.add(FeeCache(key=pvid, data=Fees(**fees).to_dict(), fetched_at=NOW))
+def seed_fee(session, *items):
+    for it in items:
+        row, _ = parse_commission_row(it)
+        session.add(Commission(fetched_at=NOW, **row))
+    session.add(FeeCache(key="commissions", data={}, fetched_at=NOW)) if session.get(FeeCache, "commissions") is None else None
     session.flush()
 
 
+def cost(session, v, toman):
+    session.add(VariantCost(variant_id=v.id, buy_cost=toman, source="excel", updated_at=NOW))
+    session.flush()
+
+
+def engine(s=None):
+    s = s or settings()
+    return FloorEngine(s, FeeProvider(None, s))
+
+
 # ---------- units ----------
-def test_to_toman():
+def test_to_toman_rial_is_divided_by_ten():
     assert to_toman(1000, "rial") == 100 and to_toman(1000, "toman") == 1000
     assert to_toman(1000, "unknown") is None and to_toman(None, "rial") is None
 
 
-# ---------- math ----------
+# ---------- math (Toman) ----------
 def test_net_profit_all_components():
-    fees = Fees(commission_pct=10, commission_fixed=1000, fulfillment_pct=2, fulfillment_fixed=500, tax_pct=1)
-    ex = Extras(ad_share_pct=3, return_reserve_pct=2, packaging_toman=700)
-    # price 100_000: variable 18% = 18_000; fixed = cost 50_000 + 1000 + 500 + 700
-    assert net_profit(100_000, 50_000, fees, ex) == pytest.approx(100_000 - 18_000 - 52_200)
+    comps = Components(pct={"fulfillment": 2, "tax": 1, "ad_share": 3, "return_reserve": 2},
+                       toman={"fulfillment": 500, "packaging": 700})
+    # price 100_000 toman: commission 10% + 8% = 18_000; fixed = cost 50_000 + 500 + 700
+    assert net_profit(100_000, 50_000, 10, comps) == pytest.approx(100_000 - 18_000 - 51_200)
 
 
 def test_floor_is_smallest_price_meeting_margin():
-    fees = Fees(commission_pct=10)
-    f, why = compute_floor(60_000, fees, E0, margin_pct=10, min_profit=None)
-    assert why == "computed" and f == math.ceil(60_000 / 0.8)           # 75_000
-    assert net_profit(f, 60_000, fees, E0) / f >= 0.10 - 1e-9
-    assert net_profit(f - 1, 60_000, fees, E0) / (f - 1) < 0.10          # one toman less fails
+    f, why = compute_floor(60_000, 10, Components(), margin_pct=10, min_profit_toman=None)
+    assert why == "computed" and f == math.ceil(60_000 / 0.8)
+    assert net_profit(f, 60_000, 10) / f >= 0.10 - 1e-9
+    assert net_profit(f - 1, 60_000, 10) / (f - 1) < 0.10
 
 
 def test_floor_min_profit_dominates_when_larger():
-    fees = Fees(commission_pct=10)
-    f, _ = compute_floor(60_000, fees, E0, margin_pct=1, min_profit=20_000)
-    assert f == math.ceil((60_000 + 20_000) / 0.9)
-    assert net_profit(f, 60_000, fees, E0) >= 20_000
+    f, _ = compute_floor(60_000, 10, Components(), margin_pct=1, min_profit_toman=20_000)
+    assert f == math.ceil(80_000 / 0.9) and net_profit(f, 60_000, 10) >= 20_000
 
 
-def test_floor_impossible_margin_and_no_rule():
-    assert compute_floor(1, Fees(commission_pct=60), E0, 50, None) == (None, "margin_impossible")
-    assert compute_floor(1, Fees(commission_pct=10), E0, None, None)[0] is None
+def test_floor_with_components():
+    comps = Components(pct={"ad_share": 5, "tax": 5}, toman={"packaging": 1000, "fulfillment": 2000})
+    f, _ = compute_floor(10_000, 5, comps, 20, None)
+    assert f == 20_000                                            # 13_000 / 0.65
+    assert net_profit(f, 10_000, 5, comps) / f == pytest.approx(0.20)
 
 
-def test_floor_uses_extras_and_fixed_fees():
-    fees = Fees(commission_pct=5, fulfillment_fixed=2000)
-    ex = Extras(ad_share_pct=5, packaging_toman=1000)
-    f, _ = compute_floor(10_000, fees, ex, 20, None)
-    assert f == math.ceil((10_000 + 1000 + 2000) / (1 - 0.10 - 0.20))
+def test_floor_impossible_and_no_rule():
+    assert compute_floor(1, 60, Components(), 50, None) == (None, "margin_impossible")
+    assert compute_floor(1, 10, Components(), None, None)[0] is None
 
 
-# ---------- fee parsing / provider ----------
-def test_parse_fees_from_two_sources():
-    fm = {"commission_pct": "commissions:data.c", "fulfillment_fixed": "calculator:data.f", "tax_pct": "data.t"}
-    fees = parse_fees({"commissions": {"data": {"c": "12.5", "t": 9}}, "calculator": {"data": {"f": 3000}}}, fm)
-    assert (fees.commission_pct, fees.fulfillment_fixed, fees.tax_pct) == (12.5, 3000, 9)
-    assert fees.commission_fixed is None and "commission_fixed" in fees.missing
+def test_components_included_and_unset():
+    c = Components(pct={"tax": 9}, toman={"packaging": 100})
+    assert c.included == ["tax", "packaging"] or set(c.included) == {"tax", "packaging"}
+    assert set(c.unset) == {"fulfillment", "ad_share", "return_reserve"}
+    assert Components().unset == list(COMPONENTS)
 
 
-async def test_fee_provider_gets_and_caches(session, make_limiter):
-    s = settings(fees_params={"product_variant_id": "{product_variant_id}", "price": "{price}"})
-    seen = []
-
-    def handler(request):
-        seen.append(request)
-        return httpx.Response(200, json={"data": {"pct": 11}})
-
-    v = mkvar(session)
-    async with DigikalaClient(s, make_limiter(requests=100), transport=httpx.MockTransport(handler)) as c:
-        fp = FeeProvider(c, s)
-        assert (await fp.get(session, v, NOW)).commission_pct == 11
-        assert (await fp.get(session, v, NOW + timedelta(hours=1))).commission_pct == 11   # cache
-        assert len(seen) == 1 and seen[0].method == "GET" and seen[0].url.params["product_variant_id"] == "9001"
-        assert seen[0].url.params["price"] == "1000000"
-        await fp.get(session, v, NOW + timedelta(hours=25))                                  # expired
-        assert len(seen) == 2
-
-
-async def test_fee_provider_disabled_or_no_fetch_returns_none(session, make_limiter):
-    v = mkvar(session)
-    assert await FeeProvider(None, Settings()).get(session, v, NOW) is None
-    s = settings()
-    async with DigikalaClient(s, make_limiter(), transport=httpx.MockTransport(lambda r: pytest.fail("no call"))) as c:
-        assert await FeeProvider(c, s).get(session, v, NOW, allow_fetch=False) is None
-
-
-async def test_fee_provider_error_gives_none(session, make_limiter):
-    s = settings()
-    v = mkvar(session)
-    lim = make_limiter()
-    lim.cfg.max_retries = 0
-    async with DigikalaClient(s, lim, transport=httpx.MockTransport(lambda r: httpx.Response(404))) as c:
-        assert await FeeProvider(c, s).get(session, v, NOW) is None
-
-
-# ---------- precedence ----------
+# ---------- rule resolution ----------
 def test_precedence_variant_brand_category_global(session):
-    s = settings(floor_brand_field="brand.name", floor_category_field="cat")
-    v = mkvar(session, raw={"brand": {"name": "Bosch"}, "cat": "oil"})
+    seed_fee(session, ci(101, 5, "Bosch", 0.03))
+    s = settings()
+    v = mkvar(session)
     set_floor_rule(session, "global", margin_pct=5)
     assert resolve_setting(session, v, s).scope == "global"
-    set_floor_rule(session, "category", "oil", margin_pct=6)
+    set_floor_rule(session, "category", "101", margin_pct=6)
     assert resolve_setting(session, v, s).scope == "category"
-    set_floor_rule(session, "brand", "Bosch", margin_pct=7)
+    set_variant_brand(session, "1", "5")
+    set_floor_rule(session, "brand", "5", margin_pct=7)
     assert resolve_setting(session, v, s).scope == "brand"
     set_floor_rule(session, "variant", "1", margin_pct=8)
     assert resolve_setting(session, v, s).margin_pct == 8
 
 
-def test_precedence_skips_empty_rows_and_unconfigured_scopes(session):
-    s = settings()                                   # no brand/category fields configured
-    v = mkvar(session, raw={"brand": "X"})
+def test_brand_scope_ignored_without_manual_brand(session):
+    s = settings()
+    v = mkvar(session)
+    set_floor_rule(session, "brand", "5", margin_pct=7)          # exists, but this variant has no brand set
     set_floor_rule(session, "global", margin_pct=5)
-    session.add(FloorSetting(scope="variant", scope_key="1"))   # exists but sets nothing
-    session.flush()
     assert resolve_setting(session, v, s).scope == "global"
-    other = mkvar(session, vid="2", pvid="2")
-    assert resolve_setting(session, other, s).scope == "global"
+
+
+def test_rows_that_set_no_rule_are_skipped(session):
+    v = mkvar(session)
+    set_floor_rule(session, "global", margin_pct=5)
+    session.add(FloorSetting(scope="variant", scope_key="1", ad_share_pct=2))   # components only: not a margin rule
+    session.flush()
+    assert resolve_setting(session, v, settings()).scope == "global"
+
+
+def test_components_resolved_per_component_most_specific_first(session):
+    v = mkvar(session)
+    set_floor_rule(session, "global", tax_pct=9, packaging_toman=1000, ad_share_pct=2)
+    set_floor_rule(session, "category", "101", ad_share_pct=4, fulfillment_toman=5000)
+    c = resolve_components(session, v, settings())
+    assert c.pct["ad_share"] == 4 and c.pct["tax"] == 9           # category overrides ad_share, global supplies tax
+    assert c.toman["packaging"] == 1000 and c.toman["fulfillment"] == 5000
+    assert "return_reserve" in c.unset and "tax" not in c.unset
+
+
+def test_components_default_unset(session):
+    assert resolve_components(session, mkvar(session), settings()).included == []
 
 
 def test_set_floor_rule_validation_and_idempotence(session):
     set_floor_rule(session, "global", margin_pct=5)
-    set_floor_rule(session, "global", min_profit_toman=1000)           # updates same row
+    set_floor_rule(session, "global", min_profit_toman=1000, tax_pct=9)
     assert session.scalar(select(func.count()).select_from(FloorSetting)) == 1
     row = session.scalar(select(FloorSetting))
-    assert (row.margin_pct, row.min_profit_toman) == (5, 1000)
+    assert (row.margin_pct, row.min_profit_toman, row.tax_pct) == (5, 1000, 9)
     for bad in (dict(scope="nope"), dict(scope="brand"), dict(scope="global", margin_pct=-1),
-                dict(scope="global", margin_pct=100)):
+                dict(scope="global", margin_pct=100), dict(scope="global", tax_pct=100),
+                dict(scope="global", bogus=1), dict(scope="global", packaging_toman=-5)):
         with pytest.raises(ValueError):
             set_floor_rule(session, **bad)
 
 
+def test_set_variant_brand_validates_against_commissions(session):
+    mkvar(session)
+    with pytest.raises(ValueError, match="sync-fees"):
+        set_variant_brand(session, "1", "5")
+    seed_fee(session, ci(101, 5, "Bosch", 0.03))
+    with pytest.raises(ValueError, match="not found in commissions"):
+        set_variant_brand(session, "1", "999")
+    with pytest.raises(ValueError, match="variant"):
+        set_variant_brand(session, "nope", "5")
+    set_variant_brand(session, "1", "5")
+    set_variant_brand(session, "1", "5")                           # idempotent
+    assert session.scalar(select(func.count()).select_from(VariantBrand)) == 1
+
+
 # ---------- engine ----------
 async def test_needs_cost_without_manual_floor(session):
-    s = settings()
     v = mkvar(session)
     set_floor_rule(session, "global", margin_pct=10)
-    r = await FloorEngine(s).evaluate(session, v, NOW)
+    r = await engine().evaluate(session, v, NOW)
     assert r.status == NEEDS_COST and r.floor_toman is None
 
 
 async def test_manual_floor_used_when_cost_missing(session):
-    s = settings()
-    v = mkvar(session, price=1_000_000)
+    v = mkvar(session, price_rial=10_000_000)                     # 1,000,000 toman
     set_floor_rule(session, "global", margin_pct=10, floor_manual_toman=800_000, floor_manual_pct=90)
-    r = await FloorEngine(s).evaluate(session, v, NOW)
-    assert r.status == OK and r.floor_toman == 900_000 and r.reason == "manual_floor_no_cost"   # max(800k, 90% of 1M)
+    r = await engine().evaluate(session, v, NOW)
+    assert r.status == OK and r.floor_toman == 900_000 and r.reason == "manual_floor_no_cost"
 
 
 async def test_manual_pct_needs_unit(session):
-    s = settings(price_unit="unknown")
     v = mkvar(session)
     set_floor_rule(session, "global", floor_manual_pct=90)
-    assert (await FloorEngine(s).evaluate(session, v, NOW)).status == NEEDS_UNIT
+    assert (await engine(settings(price_unit="unknown")).evaluate(session, v, NOW)).status == NEEDS_UNIT
 
 
 async def test_no_rule(session):
-    assert (await FloorEngine(settings()).evaluate(session, mkvar(session), NOW)).status == NO_RULE
+    assert (await engine().evaluate(session, mkvar(session), NOW)).status == NO_RULE
 
 
-async def test_needs_fees_when_not_cached_or_configured(session):
+async def test_needs_fees_without_commission_row_or_category(session):
     v = mkvar(session)
-    session.add(VariantCost(variant_id=v.id, buy_cost=600_000, source="excel", updated_at=NOW))
+    cost(session, v, 600_000)
     set_floor_rule(session, "global", margin_pct=10)
-    r = await FloorEngine(settings()).evaluate(session, v, NOW, allow_fetch=False)
-    assert r.status == NEEDS_FEES
+    assert (await engine().evaluate(session, v, NOW, allow_fetch=False)).status == NEEDS_FEES
+    seed_fee(session, ci(999))                                    # other category only
+    assert (await engine().evaluate(session, v, NOW, allow_fetch=False)).status == NEEDS_FEES
+    nocat = Variant(digikala_variant_id="9", price_sale=1, active=True, raw_json={})
+    session.add(nocat)
+    session.flush()
+    cost(session, nocat, 100)
+    assert (await engine().evaluate(session, nocat, NOW)).status == NEEDS_FEES
 
 
-async def test_floor_computed_with_cost_and_fees(session):
-    s = settings(cost_ad_share_pct=2)
+async def test_floor_computed_with_real_commission_and_manual_components(session):
     v = mkvar(session)
-    session.add(VariantCost(variant_id=v.id, buy_cost=600_000, source="excel", updated_at=NOW))
-    cache_fees(session, commission_pct=8)
+    seed_fee(session, ci(101, 5, "Bosch", 0.08))
+    cost(session, v, 600_000)
+    set_floor_rule(session, "global", margin_pct=10, ad_share_pct=2)
+    r = await engine().evaluate(session, v, NOW)
+    assert r.status == OK and r.floor_toman == math.ceil(600_000 / (1 - 0.08 - 0.02 - 0.10))
+    assert r.reason == "computed" and r.fee_reason == "fee_category_row" and r.commission_pct == 8.0
+    assert r.included_components == ["ad_share"] and set(r.unset_components) == set(COMPONENTS) - {"ad_share"}
+
+
+async def test_unset_components_listed_and_not_included(session):
+    v = mkvar(session)
+    seed_fee(session, ci(101, 5, "Bosch", 0.10))
+    cost(session, v, 100_000)
     set_floor_rule(session, "global", margin_pct=10)
-    r = await FloorEngine(s, FeeProvider(None, s)).evaluate(session, v, NOW)
-    assert r.status == OK and r.floor_toman == math.ceil(600_000 / (1 - 0.10 - 0.10)) and r.reason == "computed"
-    assert r.computed_floor_toman == r.floor_toman
+    r = await engine().evaluate(session, v, NOW)
+    assert r.unset_components == list(COMPONENTS) and r.included_components == []
+    assert r.floor_toman == math.ceil(100_000 / 0.8)             # unset costs are counted as 0, and said so
+
+
+async def test_fee_assumed_max_brand_recorded_in_result_and_event(session):
+    v = mkvar(session)
+    seed_fee(session, ci(101, 5, "A", 0.03), ci(101, 6, "B", 0.08))
+    cost(session, v, 600_000)
+    set_floor_rule(session, "global", margin_pct=10)
+    r = await engine().evaluate(session, v, NOW)
+    assert r.fee_reason == FEE_ASSUMED_MAX_BRAND and r.commission_pct == 8.0
+    d = await engine().assess_loss(session, v, 1, 1, NOW)
+    assert d["fee_reason"] == FEE_ASSUMED_MAX_BRAND
+    ev = session.scalar(select(FloorEvent))
+    assert ev.reason.endswith("+fee_assumed_max_brand")
+
+
+async def test_manual_brand_selects_that_commission(session):
+    v = mkvar(session)
+    seed_fee(session, ci(101, 5, "A", 0.03), ci(101, 6, "B", 0.08))
+    cost(session, v, 600_000)
+    set_floor_rule(session, "global", margin_pct=10)
+    set_variant_brand(session, "1", "5")
+    r = await engine().evaluate(session, v, NOW)
+    assert r.fee_reason == FEE_BRAND_ROW and r.commission_pct == 3.0
+    assert r.floor_toman == math.ceil(600_000 / 0.87)
+
+
+async def test_extra_commission_flags_change_the_floor(session):
+    v = mkvar(session)
+    seed_fee(session, ci(101, 5, "A", 0.03, extra=0.01, return_free=0.02))
+    cost(session, v, 600_000)
+    set_floor_rule(session, "global", margin_pct=10)
+    base = (await engine().evaluate(session, v, NOW)).floor_toman
+    both = settings(floor_include_extra_commission=True, floor_include_return_free_commission=True)
+    assert (await engine(both).evaluate(session, v, NOW)).floor_toman > base
+    assert base == math.ceil(600_000 / 0.87)
 
 
 async def test_manual_floor_acts_as_minimum_when_higher(session):
-    s = settings()
     v = mkvar(session)
-    session.add(VariantCost(variant_id=v.id, buy_cost=100_000, source="manual", updated_at=NOW))
-    cache_fees(session, commission_pct=10)
+    seed_fee(session, ci(101, 5, "A", 0.10))
+    cost(session, v, 100_000)
     set_floor_rule(session, "global", margin_pct=10, floor_manual_toman=500_000)
-    r = await FloorEngine(s, FeeProvider(None, s)).evaluate(session, v, NOW)
+    r = await engine().evaluate(session, v, NOW)
     assert r.floor_toman == 500_000 and r.reason == "manual_floor_higher" and r.computed_floor_toman < 500_000
 
 
-async def test_fixed_fees_need_unit_but_percent_fees_do_not(session):
-    v = mkvar(session)
-    session.add(VariantCost(variant_id=v.id, buy_cost=600_000, source="excel", updated_at=NOW))
-    set_floor_rule(session, "global", margin_pct=10)
-    s = settings(price_unit="unknown")
-    cache_fees(session, commission_pct=8)
-    assert (await FloorEngine(s, FeeProvider(None, s)).evaluate(session, v, NOW)).status == OK
-    session.get(FeeCache, "9001").data = Fees(commission_pct=8, fulfillment_fixed=5000).to_dict()
-    assert (await FloorEngine(s, FeeProvider(None, s)).evaluate(session, v, NOW)).status == NEEDS_UNIT
-
-
-async def test_fixed_fees_converted_from_rial(session):
-    s = settings(price_unit="rial")
-    v = mkvar(session, price=10_000_000)                       # 1,000,000 toman
-    session.add(VariantCost(variant_id=v.id, buy_cost=600_000, source="excel", updated_at=NOW))
-    cache_fees(session, commission_pct=0, fulfillment_fixed=100_000)   # 100k rial = 10k toman
-    set_floor_rule(session, "global", min_profit_toman=50_000)
-    r = await FloorEngine(s, FeeProvider(None, s)).evaluate(session, v, NOW)
-    assert r.floor_toman == 660_000
-
-
 async def test_impossible_margin(session):
-    s = settings()
     v = mkvar(session)
-    session.add(VariantCost(variant_id=v.id, buy_cost=1, source="excel", updated_at=NOW))
-    cache_fees(session, commission_pct=70)
+    seed_fee(session, ci(101, 5, "A", 0.70))
+    cost(session, v, 1)
     set_floor_rule(session, "global", margin_pct=40)
-    assert (await FloorEngine(s, FeeProvider(None, s)).evaluate(session, v, NOW)).status == IMPOSSIBLE
+    assert (await engine().evaluate(session, v, NOW)).status == IMPOSSIBLE
 
 
-async def test_profit_now(session):
-    s = settings()
-    v = mkvar(session, price=1_000_000)
-    eng = FloorEngine(s, FeeProvider(None, s))
-    assert await eng.profit_now(session, v, NOW) is None                       # no cost
-    session.add(VariantCost(variant_id=v.id, buy_cost=950_000, source="excel", updated_at=NOW))
-    assert await eng.profit_now(session, v, NOW) is None                       # no fees
-    cache_fees(session, commission_pct=10)
+async def test_profit_now_is_in_toman_from_rial_price(session):
+    v = mkvar(session, price_rial=10_000_000)                     # 1,000,000 toman
+    eng = engine()
+    assert await eng.profit_now(session, v, NOW) is None          # no cost
+    cost(session, v, 950_000)
+    assert await eng.profit_now(session, v, NOW) is None          # no commission
+    seed_fee(session, ci(101, 5, "A", 0.10))
     assert await eng.profit_now(session, v, NOW) == pytest.approx(-50_000)
-    assert await FloorEngine(settings(price_unit="unknown"), FeeProvider(None, s)).profit_now(session, v, NOW) is None
+    set_floor_rule(session, "global", packaging_toman=10_000)
+    assert await eng.profit_now(session, v, NOW) == pytest.approx(-60_000)
+    assert await engine(settings(price_unit="unknown")).profit_now(session, v, NOW) is None
+    toman = engine(settings(price_unit="toman"))
+    v.price_sale = 1_000_000
+    assert await toman.profit_now(session, v, NOW) == pytest.approx(-60_000)
 
 
-def test_label_and_win_price(session):
-    s = settings()
-    eng = FloorEngine(s)
-    from sudyar.floor import FloorResult
+def test_label_and_win_price():
+    eng = engine()
     ok = FloorResult(OK, floor_toman=1000)
     assert eng.label(ok, 1000) == CAN_WIN and eng.label(ok, 999) == NEED_BELOW and eng.label(ok, None) == "unknown"
     assert eng.label(FloorResult(NEEDS_COST), 5000) == "needs_cost"
-    assert eng.win_price_toman(20_000, 99) == 2000                    # suggested price is Rial per Swagger
-    assert eng.win_price_toman(None, 5000) == 5000                    # price_unit toman
-    assert FloorEngine(settings(price_unit="unknown")).win_price_toman(None, 5000) is None
+    assert eng.win_price_toman(20_000, 99) == 2000                # suggested price is Rial
+    assert eng.win_price_toman(None, 50_000) == 5000              # price_unit rial
+    assert engine(settings(price_unit="toman")).win_price_toman(None, 5000) == 5000
+    assert engine(settings(price_unit="unknown")).win_price_toman(None, 5000) is None
 
 
 async def test_assess_loss_labels_and_records_event_once(session):
-    s = settings()
     v = mkvar(session)
-    session.add(VariantCost(variant_id=v.id, buy_cost=600_000, source="excel", updated_at=NOW))
-    cache_fees(session, commission_pct=10)
+    seed_fee(session, ci(101, 5, "A", 0.10))
+    cost(session, v, 600_000)
     set_floor_rule(session, "global", margin_pct=10)
-    eng = FloorEngine(s, FeeProvider(None, s))
+    eng = engine()
     floor = math.ceil(600_000 / 0.8)
     d = await eng.assess_loss(session, v, suggested_price=(floor + 1000) * 10, buy_box_price=None, now=NOW)
-    assert d["label"] == CAN_WIN and d["floor_toman"] == floor
+    assert d["label"] == CAN_WIN and d["floor_toman"] == floor and d["unset_components"] == list(COMPONENTS)
     d = await eng.assess_loss(session, v, suggested_price=(floor - 1000) * 10, buy_box_price=None, now=NOW)
     assert d["label"] == NEED_BELOW
-    assert session.scalar(select(func.count()).select_from(FloorEvent)) == 1      # unchanged floor -> 1 event
+    assert session.scalar(select(func.count()).select_from(FloorEvent)) == 1
     ev = session.scalar(select(FloorEvent))
     assert ev.floor == floor and ev.suggested_floor == floor and ev.reason.startswith("ok:")
 
 
 def test_record_floor_event_on_change(session):
-    from sudyar.floor import FloorResult
     v = mkvar(session)
     assert record_floor_event(session, v, FloorResult(NEEDS_COST, reason="x"), NOW) is not None
     assert record_floor_event(session, v, FloorResult(NEEDS_COST, reason="x"), NOW) is None

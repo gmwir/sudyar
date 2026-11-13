@@ -102,30 +102,27 @@ class Settings(BaseModel):
     bale_chat_id: SecretStr = SecretStr("")
     bale_api_base: str = ""  # UNVERIFIED: Bale Bot API base URL, must be provided by the user
 
-    # --- Profit floor (Part 3) ---
-    # UNVERIFIED: unit of variant prices (price_sale, buy_box_price): rial | toman | unknown.
-    # While "unknown", no floor can be compared with a price (status needs_unit). Set it after
-    # comparing one price with the seller panel.
-    price_unit: str = "unknown"
-    # Per the Swagger (as relayed): winning-price suggested_price is an integer in Rial.
+    # --- Profit floor (Parts 3 / 3b) ---
+    # Per the official Swagger: Digikala prices and winning-price suggested_price are in RIAL.
+    # Floor math is unit-explicit (prices are converted to Toman; Rial/10); Persian messages show Toman.
+    price_unit: str = "rial"  # rial | toman (anything else -> status needs_unit)
     suggested_price_unit: str = "rial"
-    # UNVERIFIED: fee endpoints. Empty = disabled (floor status needs_fees). Paths, query params
-    # (templates with {product_variant_id} / {price}) and the response mapping must come from the
-    # official Swagger. Map values look like "commissions:data.commission_pct" or
-    # "calculator:data.fulfillment_fixed" (source:dotted.path).
-    fees_commission_path: str = ""
-    fees_calculator_path: str = ""
-    fees_params: dict[str, str] = Field(default_factory=lambda: {"product_variant_id": "{product_variant_id}"})
-    fees_field_map: dict[str, str] = Field(default_factory=dict)
-    fees_cache_seconds: float = 86400
-    # Costs Digikala does not tell us: YOU set them (0 = not applied, never guessed).
-    cost_ad_share_pct: float = 0
-    cost_return_reserve_pct: float = 0
-    cost_packaging_toman: float = 0
-    # UNVERIFIED: dotted paths into each variant's raw_json for brand / category / sku.
-    floor_brand_field: str = ""
-    floor_category_field: str = ""
-    cost_sku_field: str = ""
+    # GET /open-api/v1/commissions/ (scope: commission). `commission` is a FRACTION (0.03 = 3%).
+    commissions_path: str = "/open-api/v1/commissions/"
+    fees_only_my_commissions: bool = False  # UNVERIFIED meaning of search[my_commissions]; off = not sent
+    fees_main_category_id: str = ""  # optional search[main_category_id]
+    fees_cache_seconds: float = 86400  # commissions are re-read at most once per 24 h
+    fees_max_pages: int = 200
+    # UNCONFIRMED meaning in the Swagger: off by default, floor uses `commission` only.
+    floor_include_extra_commission: bool = False
+    floor_include_return_free_commission: bool = False
+    # GET /open-api/v1/insight/sales-reports (scope: insight). range = last_7_days|last_14_days|last_30_days.
+    sales_reports_path: str = "/open-api/v1/insight/sales-reports"
+    sales_cache_seconds: float = 86400
+    sales_max_pages: int = 50
+    # Variant list items have category_id and supplier_code (used as SKU). They have NO brand field.
+    floor_category_field: str = "category_id"
+    cost_sku_field: str = "supplier_code"
 
     rate_limit_requests: int = 30
     rate_limit_period_seconds: float = 30
@@ -241,15 +238,16 @@ def load_settings() -> Settings:
     put("bale_api_base", "BALE_API_BASE")
     put("price_unit", "DIGIKALA_PRICE_UNIT", lambda v: v.strip().lower())
     put("suggested_price_unit", "DIGIKALA_SUGGESTED_PRICE_UNIT", lambda v: v.strip().lower())
-    put("fees_commission_path", "FEES_COMMISSION_PATH")
-    put("fees_calculator_path", "FEES_CALCULATOR_PATH")
-    put("fees_params", "FEES_PARAMS", json.loads)
-    put("fees_field_map", "FEES_FIELD_MAP", json.loads)
+    put("commissions_path", "FEES_COMMISSIONS_PATH")
+    put("fees_only_my_commissions", "FEES_ONLY_MY_COMMISSIONS", to_bool)
+    put("fees_main_category_id", "FEES_MAIN_CATEGORY_ID")
     put("fees_cache_seconds", "FEES_CACHE_SECONDS", float)
-    put("cost_ad_share_pct", "COST_AD_SHARE_PCT", float)
-    put("cost_return_reserve_pct", "COST_RETURN_RESERVE_PCT", float)
-    put("cost_packaging_toman", "COST_PACKAGING_TOMAN", float)
-    put("floor_brand_field", "FLOOR_BRAND_FIELD")
+    put("fees_max_pages", "FEES_MAX_PAGES", int)
+    put("floor_include_extra_commission", "FLOOR_INCLUDE_EXTRA_COMMISSION", to_bool)
+    put("floor_include_return_free_commission", "FLOOR_INCLUDE_RETURN_FREE_COMMISSION", to_bool)
+    put("sales_reports_path", "SALES_REPORTS_PATH")
+    put("sales_cache_seconds", "SALES_CACHE_SECONDS", float)
+    put("sales_max_pages", "SALES_MAX_PAGES", int)
     put("floor_category_field", "FLOOR_CATEGORY_FIELD")
     put("cost_sku_field", "COST_SKU_FIELD")
     put("rate_limit_requests", "RATE_LIMIT_REQUESTS", int)

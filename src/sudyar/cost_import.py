@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .floor import _dig
+from .floor import _field
 from .models import Variant, VariantCost, utcnow
 
 
@@ -106,9 +106,9 @@ def _sku_index(session: Session, s: Settings) -> dict[str, Variant]:
         return {}
     idx: dict[str, Variant] = {}
     for v in session.scalars(select(Variant)):
-        sku = _dig(v.raw_json, s.cost_sku_field) if v.raw_json else None
+        sku = _field(v.raw_json, s.cost_sku_field)
         if sku not in (None, ""):
-            idx[str(sku).strip()] = v
+            idx[sku.strip()] = v
     return idx
 
 

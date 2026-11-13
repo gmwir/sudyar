@@ -87,10 +87,20 @@ def test_dry_run_saves_nothing(session, tmp_path):
 def test_sku_requires_config(session, tmp_path):
     seed(session)
     p = write_csv(tmp_path, "sku,buy_cost\nSKU-1,1000\nNOPE,5\n")
-    r = import_costs(session, p, Settings())
+    r = import_costs(session, p, Settings(cost_sku_field=""))
     assert r.created == 0 and "not configured" in r.rejected[0][1]
     r = import_costs(session, p, Settings(cost_sku_field="sku"))
     assert r.created == 1 and "not found" in r.rejected[0][1]
+
+
+def test_sku_defaults_to_supplier_code(session, tmp_path):
+    assert Settings().cost_sku_field == "supplier_code"
+    for i in ("1", "2"):
+        session.add(Variant(digikala_variant_id=i, raw_json={"supplier_code": f"SC-{i}"}, active=True))
+    session.flush()
+    p = write_csv(tmp_path, "sku,buy_cost\nSC-1,1000\nSC-2,2000\nSC-9,5\n")
+    r = import_costs(session, p, Settings())
+    assert r.created == 2 and "not found" in r.rejected[0][1]
 
 
 def test_variant_id_wins_over_sku(session, tmp_path):

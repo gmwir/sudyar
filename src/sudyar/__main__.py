@@ -8,7 +8,8 @@ from .logging_setup import setup_logging
 
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
-         "floor-report [--top N] [--fetch-fees N] | set-floor ... | healthcheck]")
+         "floor-report [--top N] [--range R] | sync-fees | sales-sync --range last_30_days [--category-id N] "
+         "[--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
 
 
 def check_config() -> int:
@@ -22,8 +23,6 @@ def check_config() -> int:
     print("Configuration OK (token and password are present; values are not shown).")
     if s.price_unit not in ("rial", "toman"):
         print("Note: DIGIKALA_PRICE_UNIT is not set (rial or toman). Profit floors cannot be compared with prices until it is.")
-    if not s.fees_field_map or not (s.fees_commission_path or s.fees_calculator_path):
-        print("Note: fee endpoints (FEES_*) are not configured, so floors will show 'needs_fees'.")
     print("Notifications: " + ("ENABLED" if s.notify_enabled else "DRY-RUN (messages are only printed, never sent)"))
     return 0
 
@@ -182,35 +181,86 @@ def import_costs_cmd(args: list[str]) -> int:
     return 0
 
 
-def floor_report_cmd(args: list[str]) -> int:
-    from .floor import FeeProvider, FloorEngine
-    from .floor_report import build_report, format_report
-    from .models import Variant, utcnow
+def _api_hint(e: Exception) -> str:
+    msg = f"{type(e).__name__}: {e}"
+    if "status 401" in msg or "status 403" in msg:
+        msg += "  (check the Self Token scopes: sync-fees needs 'commission', sales-sync needs 'insight')"
+    return msg
 
-    def opt(name: str, default: int) -> int:
-        return int(args[args.index(name) + 1]) if name in args else default
 
-    top, fetch = opt("--top", 20), opt("--fetch-fees", 0)
+def _opt(args: list[str], name: str, cast=str, default=None):
+    return cast(args[args.index(name) + 1]) if name in args else default
+
+
+def sync_fees_cmd() -> int:
+    from .fees import sync_commissions
+    from .models import utcnow
+
     s = load_settings()
     s.require_ok()
     factory, client = _build(s)
-    engine = FloorEngine(s, FeeProvider(client if fetch else None, s))
 
     async def main():
-        now = utcnow()
+        async with client:
+            with factory() as session:
+                return await sync_commissions(client, session, s, utcnow())
+
+    try:
+        r = asyncio.run(main())
+    except Exception as e:
+        print(f"sync-fees failed: {_api_hint(e)}")
+        return 1
+    print(f"Commissions saved: {r.rows} rows ({r.pages} pages), rejected: {len(r.rejected or [])}")
+    for line in (r.rejected or [])[:20]:
+        print(f"  rejected {line}")
+    return 0
+
+
+def sales_sync_cmd(args: list[str]) -> int:
+    from .models import utcnow
+    from .sales import sync_sales
+
+    range_ = _opt(args, "--range", str, "last_30_days")
+    s = load_settings()
+    s.require_ok()
+    factory, client = _build(s)
+
+    async def main():
+        async with client:
+            with factory() as session:
+                return await sync_sales(client, session, s, range_, utcnow(),
+                                        _opt(args, "--category-id"), "--force" in args)
+
+    try:
+        r = asyncio.run(main())
+    except ValueError as e:
+        print(f"Invalid options: {e}")
+        return 2
+    except Exception as e:
+        print(f"sales-sync failed: {_api_hint(e)}")
+        return 1
+    if r.cached:
+        print(f"Sales for {range_} were read less than 24 h ago: using the saved data (use --force to re-read).")
+        return 0
+    print(f"Sales saved for {range_}: {r.rows} products ({r.pages} pages)" + ("; STOPPED at SALES_MAX_PAGES" if r.truncated else ""))
+    return 0
+
+
+def floor_report_cmd(args: list[str]) -> int:
+    from .floor import FloorEngine
+    from .fees import FeeProvider
+    from .floor_report import build_report, format_report
+    from .models import utcnow
+
+    s = load_settings()
+    s.require_ok()
+    factory, _ = _build(s)
+    engine = FloorEngine(s, FeeProvider(None, s))  # no client: the report never calls Digikala
+
+    async def main():
         with factory() as session:
-            if fetch:  # explicit, bounded, rate-limited GETs; off by default
-                from sqlalchemy import select
-                async with client:
-                    n = 0
-                    for v in session.scalars(select(Variant).where(Variant.active.is_(True))):
-                        if n >= fetch:
-                            break
-                        if await engine.fees.get(session, v, now, allow_fetch=False) is None:
-                            await engine.fees.get(session, v, now, allow_fetch=True)
-                            n += 1
-                    session.commit()
-            return await build_report(session, engine, now, top)
+            return await build_report(session, engine, utcnow(), _opt(args, "--top", int, 20),
+                                      _opt(args, "--range", str, "last_30_days"))
 
     print(format_report(asyncio.run(main())))
     return 0
@@ -218,28 +268,68 @@ def floor_report_cmd(args: list[str]) -> int:
 
 def set_floor_cmd(args: list[str]) -> int:
     """set-floor --scope global|brand|category|variant [--key K] [--margin-pct N] [--min-profit N]
-    [--manual-toman N] [--manual-pct N]   (writes only our own database)"""
+    [--manual-toman N] [--manual-pct N] and cost components, each --<name>-pct N / --<name>-toman N for
+    fulfillment, tax, ad-share, return-reserve, packaging.  (writes only our own database)"""
     from .db import make_engine, make_session_factory
-    from .floor import set_floor_rule
-
-    def val(name: str, cast=float):
-        return cast(args[args.index(name) + 1]) if name in args else None
+    from .floor import COMPONENTS, set_floor_rule
 
     try:
-        scope = val("--scope", str) or "global"
-        key = val("--key", str) or ""
+        scope = _opt(args, "--scope", str, "global")
+        key = _opt(args, "--key", str, "")
+        vals: dict = {
+            "margin_pct": _opt(args, "--margin-pct", float), "min_profit_toman": _opt(args, "--min-profit", int),
+            "floor_manual_toman": _opt(args, "--manual-toman", int), "floor_manual_pct": _opt(args, "--manual-pct", float),
+        }
+        for c in COMPONENTS:
+            flag = c.replace("_", "-")
+            vals[f"{c}_pct"] = _opt(args, f"--{flag}-pct", float)
+            vals[f"{c}_toman"] = _opt(args, f"--{flag}-toman", int)
         s = load_settings()
         s.require_ok()
         with make_session_factory(make_engine(s.database_url))() as session:
-            row = set_floor_rule(session, scope, key, margin_pct=val("--margin-pct"),
-                                 min_profit_toman=val("--min-profit", int),
-                                 floor_manual_toman=val("--manual-toman", int),
-                                 floor_manual_pct=val("--manual-pct"))
+            row = set_floor_rule(session, scope, key, **vals)
     except (ValueError, IndexError) as e:
         print(f"Invalid options: {e}")
         return 2
-    print(f"Saved rule {row.scope}/{row.scope_key or '-'}: margin%={row.margin_pct}, min_profit={row.min_profit_toman}, "
-          f"manual_toman={row.floor_manual_toman}, manual%={row.floor_manual_pct}")
+    shown = {k: getattr(row, k) for k in vals if getattr(row, k) is not None}
+    print(f"Saved rule {row.scope}/{row.scope_key or '-'}: {shown}")
+    return 0
+
+
+def set_brand_cmd(args: list[str]) -> int:
+    from .db import make_engine, make_session_factory
+    from .floor import set_variant_brand
+
+    try:
+        vid, brand = _opt(args, "--variant"), _opt(args, "--brand-id")
+        if not vid or not brand:
+            raise ValueError("need --variant ID and --brand-id N")
+        s = load_settings()
+        s.require_ok()
+        with make_session_factory(make_engine(s.database_url))() as session:
+            set_variant_brand(session, vid, brand)
+    except (ValueError, IndexError) as e:
+        print(f"Invalid options: {e}")
+        return 2
+    print(f"Variant {vid} linked to brand_id {brand}.")
+    return 0
+
+
+def list_brands_cmd(args: list[str]) -> int:
+    from .db import make_engine, make_session_factory
+    from .fees import list_brands
+
+    if len(args) != 1:
+        print("Usage: python -m sudyar list-brands CATEGORY_ID")
+        return 2
+    s = load_settings()
+    s.require_ok()
+    with make_session_factory(make_engine(s.database_url))() as session:
+        rows = list_brands(session, args[0])
+    if not rows:
+        print("No commission rows for this category (run sync-fees, or check the category_id).")
+    for brand_id, title, pct in rows:
+        print(f"  brand_id={brand_id or '-'}  {title or ''}  commission={pct}%")
     return 0
 
 
@@ -264,7 +354,8 @@ def main(argv: list[str]) -> int:
     setup_logging()
     cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
-    free = ("import-costs", "floor-report", "set-floor")  # take options
+    cmds.update({"sync-fees": 1})
+    free = ("import-costs", "floor-report", "set-floor", "sales-sync", "set-brand", "list-brands")  # take options
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2
@@ -275,6 +366,14 @@ def main(argv: list[str]) -> int:
             return floor_report_cmd(argv[1:])
         if argv[0] == "set-floor":
             return set_floor_cmd(argv[1:])
+        if argv[0] == "sales-sync":
+            return sales_sync_cmd(argv[1:])
+        if argv[0] == "set-brand":
+            return set_brand_cmd(argv[1:])
+        if argv[0] == "list-brands":
+            return list_brands_cmd(argv[1:])
+        if argv[0] == "sync-fees":
+            return sync_fees_cmd()
         if argv[0] == "healthcheck":
             return healthcheck()
         if argv[0] == "check-config":
