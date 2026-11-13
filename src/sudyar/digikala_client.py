@@ -40,7 +40,10 @@ class DigikalaClient:
         # Token lives only in this header; it is never logged.
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
-            headers={settings.auth_header: f"{settings.auth_prefix}{token}"},
+            headers={
+                settings.auth_header: f"{settings.auth_prefix}{token}",
+                "content-type": "application/json",
+            },
             timeout=30,
             transport=transport,
             event_hooks={"request": [_async_guard]},
@@ -79,16 +82,43 @@ class DigikalaClient:
         """Yield every variant (raw dict), page by page."""
         s = self.settings
         if not s.variants_path:
-            raise ApiError("DIGIKALA_VARIANTS_PATH is not set (TODO: take it from the Swagger).")
+            raise ApiError("DIGIKALA_VARIANTS_PATH is not set.")
         for page in range(1, max_pages + 1):
             data = await self.get(s.variants_path, {s.page_param: page, s.page_size_param: s.page_size})
             items = _dig(data, s.items_key)
             if not isinstance(items, list):
-                raise ApiError(f"Response has no list at '{s.items_key}' (TODO: check Swagger).")
+                raise ApiError(f"Response has no list at '{s.items_key}'.")
             for item in items:
                 yield item
-            if len(items) < s.page_size:
+            pager = _dig(data, s.pager_key)
+            total_pages = pager.get("total_pages") if isinstance(pager, dict) else None
+            if isinstance(total_pages, int):
+                if page >= total_pages:
+                    return
+            elif len(items) < s.page_size:  # no pager: fall back to short-page detection
                 return
+
+    async def get_winning_price(self, product_variant_id: int | str) -> int | None:
+        """GET winning-price -> data.suggested_price (integer, Rial per Swagger; may be None)."""
+        data = await self.get(
+            self.settings.buybox_price_path, {"product_variant_id": product_variant_id}
+        )
+        return _suggested_price(data)
+
+    async def get_nth_rank_winning_price(
+        self, product_variant_id: int | str, target_rank: int
+    ) -> int | None:
+        """GET nth-rank-winning-price -> data.suggested_price (may be None)."""
+        data = await self.get(
+            self.settings.nth_rank_price_path,
+            {"product_variant_id": product_variant_id, "target_rank": target_rank},
+        )
+        return _suggested_price(data)
+
+
+def _suggested_price(data: dict[str, Any]) -> int | None:
+    v = _dig(data, "data.suggested_price")
+    return None if v is None else int(v)
 
 
 async def _async_guard(request: httpx.Request) -> None:

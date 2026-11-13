@@ -39,8 +39,8 @@ def make_limiter(ft):
 @pytest.fixture
 def settings():
     return Settings(
-        digikala_self_token=TOKEN, postgres_password="pw", variants_path="/variants",
-        page_size=2, base_url="https://example.test/api",
+        digikala_self_token=TOKEN, postgres_password="pw", variants_path="/open-api/v1/variants",
+        page_size=2, base_url="https://seller.digikala.com",
     )
 
 

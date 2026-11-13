@@ -25,3 +25,37 @@ def test_check_config_ok_does_not_print_secrets(monkeypatch, capsys, tmp_path):
     assert cli.main(["check-config"]) == 0
     out = capsys.readouterr().out
     assert "tok-very-secret" not in out and "pw-very-secret" not in out
+
+
+def test_real_api_defaults():
+    s = Settings()
+    assert s.base_url == "https://seller.digikala.com"
+    assert s.variants_path == "/open-api/v1/variants"
+    assert s.auth_prefix == "Bearer " and s.items_key == "data.items"
+
+
+def test_buybox_status_counts(monkeypatch, capsys, tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from sudyar.models import Base, Variant
+
+    db = tmp_path / "t.db"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    monkeypatch.setenv("DIGIKALA_SELF_TOKEN", "tok")
+    eng = create_engine(f"sqlite:///{db}")
+    Base.metadata.create_all(eng)
+    with sessionmaker(eng)() as s:
+        for i, (win, ch, act) in enumerate([(True, False, True), (False, True, True), (False, False, True), (True, False, False)]):
+            s.add(Variant(digikala_variant_id=str(i), is_seller_buy_box_winner=win,
+                          is_in_buy_box_challenge=ch, active=act, raw_json={}))
+        s.commit()
+    assert cli.main(["buybox-status"]) == 0
+    out = capsys.readouterr().out
+    assert "total (active): 3" in out and "We win Buy Box:          1" in out
+    assert "We lose Buy Box:         2" in out and "challenge:    1" in out
+
+
+def test_winning_price_needs_argument(capsys):
+    assert cli.main(["winning-price"]) == 2

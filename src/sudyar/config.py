@@ -13,13 +13,29 @@ class ConfigError(Exception):
     """Raised with a clear, human-readable message when configuration is bad."""
 
 
+# Verified from the official Swagger (GET /open-api/v1/variants, items in data.items[]).
+# Left side = our name, right side = field name in the Digikala response.
+# UNITS: values are stored exactly as returned. Rial vs Toman is NOT verified yet.
 DEFAULT_FIELD_MAP = {
-    "variant_id": "id",
+    "digikala_variant_id": "id",
     "product_id": "product_id",
+    "product_variant_id": "product_variant_id",
     "title": "title",
-    "price": "price",
-    "stock": "stock",
-    "active": "is_active",
+    "product_title": "product_title",
+    "active": "active",
+    "is_archived": "is_archived",
+    "price_sale": "price_sale",
+    "cash_selling_price": "cash_selling_price",
+    "price_limit": "price_limit",
+    "marketplace_seller_stock": "marketplace_seller_stock",
+    "warehouse_stock": "warehouse_stock",
+    "buy_box_price": "buy_box_price",
+    "is_buy_box_winner": "is_buy_box_winner",
+    "is_seller_buy_box_winner": "is_seller_buy_box_winner",
+    "is_in_buy_box_challenge": "is_in_buy_box_challenge",
+    "is_sku_winner": "is_sku_winner",
+    "rating": "rating",
+    "lead_time": "lead_time",
 }
 
 
@@ -45,15 +61,18 @@ class Settings(BaseModel):
     postgres_host: str = "db"
     postgres_port: int = 5432
 
-    # TODO: confirm all of these in the official Swagger (it was unreachable when built).
-    base_url: str = "https://seller.digikala.com/open-api/v1"
-    variants_path: str = ""  # TODO: required, no guessing
+    # Verified from the official Swagger. Auth: "Authorization: Bearer <Self Token>".
+    base_url: str = "https://seller.digikala.com"
+    variants_path: str = "/open-api/v1/variants"
     auth_header: str = "Authorization"
-    auth_prefix: str = ""
+    auth_prefix: str = "Bearer "
     page_param: str = "page"
     page_size_param: str = "size"
-    page_size: int = 50
-    items_key: str = "items"
+    page_size: int = 50  # default per Swagger; max accepted size unknown, find it at first real run
+    items_key: str = "data.items"
+    pager_key: str = "data.pager"
+    buybox_price_path: str = "/open-api/v1/pricing/buybox/price-suggestion/winning-price"
+    nth_rank_price_path: str = "/open-api/v1/pricing/buybox/price-suggestion/nth-rank-winning-price"
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
 
     rate_limit_requests: int = 30
@@ -86,10 +105,7 @@ class Settings(BaseModel):
         if not self.database_url_override and not self.postgres_password.get_secret_value():
             out.append("POSTGRES_PASSWORD is missing. Choose a password and put it in the .env file.")
         if not self.variants_path.strip():
-            out.append(
-                "DIGIKALA_VARIANTS_PATH is empty (TODO: copy the 'list variants' path "
-                "from the official Swagger into .env)."
-            )
+            out.append("DIGIKALA_VARIANTS_PATH is empty (default is /open-api/v1/variants).")
         return out
 
     def require_ok(self) -> None:
