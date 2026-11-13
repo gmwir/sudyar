@@ -20,16 +20,21 @@ READ_ONLY_SCOPES = (
 )
 
 
-def env_file_warning(path: str = ".env") -> str | None:
-    """Warn if the .env file (with the token) can be read by other users on this machine (Linux/Mac)."""
+def env_file_warning(path: str = ".env", os_name: str | None = None) -> str | None:
+    """One line about .env permissions, or None if all is fine.
+
+    Linux/Mac: warn if other users can read the file. Windows: the check cannot be done, so say that.
+    """
     import os
     import stat
 
-    if os.name == "nt" or not os.path.isfile(path):
+    if (os_name or os.name) == "nt":
+        return "Note: the .env permission check is skipped on Windows (keep .env in a folder only you can open)."
+    if not os.path.isfile(path):
         return None
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode & 0o077:
-        return f".env is readable by other users (mode {mode:03o}). Run: chmod 600 .env"
+        return f"WARNING: .env is readable by other users (mode {mode:03o}). Run: chmod 600 .env"
     return None
 
 
@@ -38,7 +43,7 @@ def check_config() -> int:
     problems = s.problems() + s.notify_problems()
     warn = env_file_warning()
     if warn:
-        print(f"WARNING: {warn}")
+        print(warn)
     if problems:
         print("Configuration problems:")
         for p in problems:

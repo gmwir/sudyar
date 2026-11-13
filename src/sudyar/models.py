@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, UniqueConstraint, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, CheckConstraint, UniqueConstraint, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -101,6 +101,7 @@ class VariantCost(Base):
     """Our purchase cost per variant (toman). Optional: the app works without any rows."""
 
     __tablename__ = "variant_costs"
+    __table_args__ = (CheckConstraint("buy_cost IS NULL OR buy_cost > 0", name="ck_variant_costs_buy_cost_positive"),)
 
     variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
     buy_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = unknown

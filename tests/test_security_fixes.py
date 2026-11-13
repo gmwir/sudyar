@@ -60,23 +60,26 @@ def engine(**kw):
 
 
 # =========== 1. manual floor never below cost; manual <= 0 rejected ===========
-async def test_manual_floor_is_raised_to_cost(session):
+async def test_manual_floor_is_raised_to_breakeven(session):
     v = mkvar(session)
+    seed(session, ci(101, None, None, 0.10))
     cost(session, v, 900_000)
     set_floor_rule(session, "global", floor_manual_toman=1_000)
     r = await engine().evaluate(session, v, NOW)
-    assert r.status == "ok" and r.floor_toman == 900_000 and r.reason == "manual_floor_raised_to_cost"
+    assert r.status == "ok" and r.floor_toman == 1_000_000 and r.reason == "manual_floor_raised_to_breakeven"
 
 
-async def test_manual_pct_floor_also_raised_to_cost(session):
+async def test_manual_pct_floor_also_raised_to_breakeven(session):
     v = mkvar(session, price_rial=10_000_000)                    # 1,000,000 toman
+    seed(session, ci(101, None, None, 0.10))
     cost(session, v, 900_000)
-    set_floor_rule(session, "global", floor_manual_pct=50)       # 500,000 < cost
-    assert (await engine().evaluate(session, v, NOW)).floor_toman == 900_000
+    set_floor_rule(session, "global", floor_manual_pct=50)       # 500,000 < break-even
+    assert (await engine().evaluate(session, v, NOW)).floor_toman == 1_000_000
 
 
-async def test_manual_floor_above_cost_is_kept(session):
+async def test_manual_floor_above_breakeven_is_kept(session):
     v = mkvar(session)
+    seed(session, ci(101, None, None, 0.10))
     cost(session, v, 100_000)
     set_floor_rule(session, "global", floor_manual_toman=500_000)
     r = await engine().evaluate(session, v, NOW)
@@ -106,8 +109,8 @@ async def test_legacy_zero_manual_floor_in_db_is_ignored(session):
     v = mkvar(session)
     session.add(FloorSetting(scope="global", scope_key="", floor_manual_toman=0, floor_manual_pct=float("inf")))
     session.flush()
-    r = await engine().evaluate(session, v, NOW)                # no cost, manual values unusable
-    assert r.status == "needs_cost" and r.floor_toman is None
+    r = await engine().evaluate(session, v, NOW)                # manual values unusable, nothing else to go on
+    assert r.status == "no_floor" and r.floor_toman is None
 
 
 # =========== 2. fees: single brand, rejected rows, partial sets, sharp drops ===========

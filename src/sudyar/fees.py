@@ -25,7 +25,8 @@ FEE_CATEGORY_ROW = "fee_category_row"
 FEE_BRAND_ROW = "fee_brand_row"
 FEE_ASSUMED_MAX_BRAND = "fee_assumed_max_brand"
 FEE_ASSUMED_SINGLE_BRAND = "fee_assumed_single_brand"  # one brand-specific row: NOT the category rate
-MAX_PARTIAL_CATEGORIES = 2000
+MAX_PARTIAL_CATEGORIES = 50_000  # safety limit only; beyond it EVERY category is marked incomplete
+ALL_CATEGORIES = "*"  # marker: no floor for any category
 RETRY_AFTER_FAILURE = timedelta(hours=1)
 
 
@@ -134,7 +135,7 @@ async def sync_commissions(client, session: Session, s: Settings, now: datetime,
     session.execute(delete(Commission))
     session.add_all(Commission(fetched_at=now, **r) for r in rows)
     data = {"rows": len(rows), "rejected": len(rejected), "pages": page,
-            "partial_categories": sorted(partial)[:MAX_PARTIAL_CATEGORIES]}
+            "partial_categories": sorted(partial) if len(partial) <= MAX_PARTIAL_CATEGORIES else [ALL_CATEGORIES]}
     if marker is None:
         session.add(FeeCache(key=MARKER_KEY, data=data, fetched_at=now))
     else:
@@ -173,6 +174,10 @@ class FeeProvider:
         at = self.synced_at(session)
         return at is not None and (now - at).total_seconds() > self.s.fees_max_stale_days * 86_400
 
+    @staticmethod
+    def _is_partial(category_id: str, partial: set[str]) -> bool:
+        return ALL_CATEGORIES in partial or category_id in partial
+
     def partial_categories(self, session: Session) -> set[str]:
         m = session.get(FeeCache, MARKER_KEY)
         data = m.data if m is not None and isinstance(m.data, dict) else {}
@@ -184,7 +189,7 @@ class FeeProvider:
             return "variant has no category_id"
         if self.is_stale(session, now):
             return f"commissions older than {self.s.fees_max_stale_days:g} days (refresh failing?) - run sync-fees"
-        if str(category_id) in self.partial_categories(session):
+        if self._is_partial(str(category_id), self.partial_categories(session)):
             return "some commission rows of this category were invalid, so the highest rate is unknown - fix and run sync-fees"
         return "no commission row for this variant's category (run sync-fees)"
 
@@ -225,7 +230,7 @@ class FeeProvider:
         if not category_id:
             return None
         partial = self._partial_cache if self._partial_cache is not None else self.partial_categories(session)
-        if str(category_id) in partial:  # never take a max over an incomplete set of rows
+        if self._is_partial(str(category_id), partial):  # never take a max over an incomplete set of rows
             return None
         rows = self._rows(session, str(category_id))
         if not rows:

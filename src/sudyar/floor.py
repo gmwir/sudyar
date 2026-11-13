@@ -31,6 +31,7 @@ OK = "ok"
 NEEDS_COST = "needs_cost"
 NEEDS_FEES = "needs_fees"
 NEEDS_UNIT = "needs_unit"
+NO_FLOOR = "no_floor"  # a manual floor was set but is not usable (e.g. 0): never "ok with floor 0"
 NO_RULE = "no_rule"
 IMPOSSIBLE = "impossible"
 
@@ -122,6 +123,19 @@ def _pos_finite(v: float | int | None) -> bool:
     return v is not None and not isinstance(v, bool) and math.isfinite(v) and v > 0
 
 
+def _valid_cost(v: float | int | None) -> float | int | None:
+    """A buy cost counts only if it is a finite number > 0; 0, negative, NaN, inf are treated as missing."""
+    return v if _pos_finite(v) else None
+
+
+def breakeven_floor(buy_cost_toman: float, commission_share: float) -> int | None:
+    """Smallest price (Toman) at which price - commission >= cost, i.e. cost / (1 - share).
+    None if the share is invalid (not finite, negative, or >= 1: no price can cover the cost)."""
+    if not math.isfinite(commission_share) or commission_share < 0 or commission_share >= 1:
+        return None
+    return math.ceil(buy_cost_toman / (1 - commission_share) - 1e-9)
+
+
 def variant_brand_id(session: Session, variant: Variant) -> str | None:
     """Brand only if the user set it manually (variants carry no brand field)."""
     row = session.get(VariantBrand, variant.id)
@@ -207,57 +221,73 @@ class FloorEngine:
         if setting is None:
             return FloorResult(NO_RULE, reason="no floor rule set (use set-floor)")
         cost_row = session.get(VariantCost, variant.id)
-        cost = cost_row.buy_cost if cost_row is not None else None
+        cost = _valid_cost(cost_row.buy_cost if cost_row is not None else None)   # 0 / negative / NaN / inf = missing
+        has_margin_rule = setting.margin_pct is not None or setting.min_profit_toman is not None
+        had_manual = setting.floor_manual_toman is not None or setting.floor_manual_pct is not None
         manual = []
         # Only positive, finite manual values count (older/hand-edited rows with 0, NaN or inf are ignored).
         if _pos_finite(setting.floor_manual_toman):
             manual.append(setting.floor_manual_toman)
         if _pos_finite(setting.floor_manual_pct):
             cur_toman = to_toman(variant.price_sale, self.s.price_unit)
-            if cur_toman is not None:
-                manual.append(math.ceil(cur_toman * setting.floor_manual_pct / 100))
-            elif not manual:
-                return FloorResult(NEEDS_UNIT, reason="manual % floor needs DIGIKALA_PRICE_UNIT", scope=setting.scope)
+            if cur_toman is None:
+                if not manual:
+                    return FloorResult(NEEDS_UNIT, reason="manual % floor needs DIGIKALA_PRICE_UNIT", scope=setting.scope)
+            elif math.isfinite(cur_toman):
+                from_pct = math.ceil(cur_toman * setting.floor_manual_pct / 100)
+                if from_pct > 0:  # a computed manual floor of 0 (e.g. current price 0) is NOT a floor
+                    manual.append(from_pct)
         manual_floor = max(manual) if manual else None
-        raised = False
-        if manual_floor is not None and cost is not None and manual_floor < cost:
-            manual_floor, raised = cost, True  # a manual floor can never be below the known buy cost
+        unusable_manual_only = had_manual and manual_floor is None and not has_margin_rule
 
         if cost is None:  # never guess a cost
             if manual_floor is not None:
                 return FloorResult(OK, manual_floor, None, "manual_floor_no_cost", setting.scope)
+            if unusable_manual_only:
+                return FloorResult(NO_FLOOR, reason="manual floor is not usable (zero/invalid, e.g. current price 0)",
+                                   scope=setting.scope)
             return FloorResult(NEEDS_COST, reason="buy_cost missing", scope=setting.scope)
-        if setting.margin_pct is None and setting.min_profit_toman is None:
-            if manual_floor is not None:
-                return FloorResult(OK, manual_floor, None, "manual_floor_raised_to_cost" if raised else "manual_floor",
-                                   setting.scope)
-            return FloorResult(NO_RULE, reason="rule has no margin/min profit", scope=setting.scope)
 
+        # Cost is known: the commission is needed to know what the cost really requires.
         fees = await self._fees_for(session, variant, now, allow_fetch)
         if fees is None:
             category = _field(variant.raw_json, self.s.floor_category_field)
             return FloorResult(NEEDS_FEES, reason=self.fees.miss_reason(session, category, now), scope=setting.scope)
         comps = resolve_components(session, variant, self.s)
-        computed, why = compute_floor(cost, fees.commission_pct, comps, setting.margin_pct, setting.min_profit_toman)
         base = dict(scope=setting.scope, fee_reason=fees.reason, commission_pct=fees.commission_pct,
                     included_components=comps.included, unset_components=comps.unset)
+        breakeven = breakeven_floor(cost, fees.commission_pct / 100)
+        if breakeven is None:
+            return FloorResult(IMPOSSIBLE, reason="commission share must be below 100%", **base)
+
+        if not has_margin_rule:
+            if manual_floor is not None:
+                effective = max(manual_floor, breakeven)  # a manual floor can never lose money on commission + cost
+                reason = "manual_floor" if effective == manual_floor else "manual_floor_raised_to_breakeven"
+                return FloorResult(OK, effective, None, reason, **base)
+            if unusable_manual_only:
+                return FloorResult(NO_FLOOR, reason="manual floor is not usable (zero/invalid, e.g. current price 0)", **base)
+            return FloorResult(NO_RULE, reason="rule has no margin/min profit", **base)
+
+        computed, why = compute_floor(cost, fees.commission_pct, comps, setting.margin_pct, setting.min_profit_toman)
         if computed is None:
             return FloorResult(IMPOSSIBLE, reason=why, **base)
-        effective = max(computed, manual_floor or 0)
+        effective = max(computed, manual_floor or 0, breakeven)
         reason = "computed" if effective == computed else "manual_floor_higher"
         return FloorResult(OK, effective, computed, reason, **base)
 
     async def profit_now(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool = False) -> float | None:
         """Net profit per unit at our current price, in Toman. None unless cost, commission and unit are known."""
         cost_row = session.get(VariantCost, variant.id)
-        if cost_row is None or cost_row.buy_cost is None:
+        cost = _valid_cost(cost_row.buy_cost if cost_row is not None else None)
+        if cost is None:
             return None
         price = to_toman(variant.price_sale, self.s.price_unit)
         fees = await self._fees_for(session, variant, now, allow_fetch)
         if price is None or fees is None:
             return None
         comps = resolve_components(session, variant, self.s)
-        return net_profit(price, cost_row.buy_cost, fees.commission_pct, comps)
+        return net_profit(price, cost, fees.commission_pct, comps)
 
     def label(self, result: FloorResult, win_price_toman: float | None) -> str:
         if result.status != OK:
