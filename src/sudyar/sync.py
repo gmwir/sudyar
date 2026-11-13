@@ -82,7 +82,7 @@ def add_snapshot(session: Session, row: Variant, taken_at) -> None:
         variant_id=row.id, taken_at=taken_at, price_sale=row.price_sale,
         buy_box_price=row.buy_box_price,
         is_seller_buy_box_winner=row.is_seller_buy_box_winner,
-        is_in_buy_box_challenge=row.is_in_buy_box_challenge, stock=row.stock,
+        is_in_buy_box_challenge=row.is_in_buy_box_challenge, stock=row.stock, active=row.active,
     ))
 
 

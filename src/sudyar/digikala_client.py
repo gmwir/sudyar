@@ -78,24 +78,30 @@ class DigikalaClient:
     async def get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         return await self._request("GET", path, params)
 
-    async def list_variants(self, max_pages: int = 10_000) -> AsyncIterator[dict[str, Any]]:
-        """Yield every variant (raw dict), page by page."""
+    async def get_variants_page(self, page: int) -> tuple[list[dict[str, Any]], int | None]:
+        """One page of variants -> (items, total_pages or None if the response has no pager)."""
         s = self.settings
         if not s.variants_path:
             raise ApiError("DIGIKALA_VARIANTS_PATH is not set.")
+        params = {**s.variants_extra_params, s.page_param: page, s.page_size_param: s.page_size}
+        data = await self.get(s.variants_path, params)
+        items = _dig(data, s.items_key)
+        if not isinstance(items, list):
+            raise ApiError(f"Response has no list at '{s.items_key}'.")
+        pager = _dig(data, s.pager_key)
+        total = pager.get("total_pages") if isinstance(pager, dict) else None
+        return items, total if isinstance(total, int) else None
+
+    async def list_variants(self, max_pages: int = 10_000) -> AsyncIterator[dict[str, Any]]:
+        """Yield every variant (raw dict), page by page."""
         for page in range(1, max_pages + 1):
-            data = await self.get(s.variants_path, {s.page_param: page, s.page_size_param: s.page_size})
-            items = _dig(data, s.items_key)
-            if not isinstance(items, list):
-                raise ApiError(f"Response has no list at '{s.items_key}'.")
+            items, total_pages = await self.get_variants_page(page)
             for item in items:
                 yield item
-            pager = _dig(data, s.pager_key)
-            total_pages = pager.get("total_pages") if isinstance(pager, dict) else None
-            if isinstance(total_pages, int):
+            if total_pages is not None:
                 if page >= total_pages:
                     return
-            elif len(items) < s.page_size:  # no pager: fall back to short-page detection
+            elif len(items) < self.settings.page_size:  # no pager: short-page detection
                 return
 
     async def get_winning_price(self, product_variant_id: int | str) -> int | None:

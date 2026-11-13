@@ -7,7 +7,8 @@ class RedactSecrets(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        for name in ("DIGIKALA_SELF_TOKEN", "POSTGRES_PASSWORD"):
+        for name in ("DIGIKALA_SELF_TOKEN", "POSTGRES_PASSWORD", "TELEGRAM_BOT_TOKEN",
+                     "TELEGRAM_CHAT_ID", "BALE_BOT_TOKEN", "BALE_CHAT_ID"):
             secret = os.environ.get(name, "")
             if len(secret) >= 4 and secret in msg:
                 msg = msg.replace(secret, "***")

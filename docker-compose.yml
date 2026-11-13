@@ -23,5 +23,18 @@ services:
       db:
         condition: service_healthy
 
+  # Buy Box radar. DISABLED until you enable it:  docker compose --profile radar up -d
+  radar:
+    profiles: ["radar"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+    command: ["sh", "-c", "until alembic upgrade head; do sleep 5; done; python -m sudyar radar-run"]
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:

@@ -75,6 +75,33 @@ class Settings(BaseModel):
     nth_rank_price_path: str = "/open-api/v1/pricing/buybox/price-suggestion/nth-rank-winning-price"
     field_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_FIELD_MAP))
 
+    # UNVERIFIED: optional server-side filter params for the variants list. Empty by default;
+    # the radar classifies tiers client-side and never relies on these.
+    variants_extra_params: dict[str, str] = Field(default_factory=dict)
+
+    # --- Radar (Part 2) ---
+    radar_hot_interval_seconds: float = 120
+    radar_warm_interval_seconds: float = 600
+    radar_calm_interval_seconds: float = 3600
+    radar_hot_lost_window_seconds: float = 3600  # "lost Buy Box in the last 60 min" => HOT
+    radar_warm_event_window_seconds: float = 86400  # any recent event => WARM
+    radar_budget_fraction: float = 0.6  # share of the 30 req / 30 s read limit the radar may use
+    winning_price_cache_seconds: float = 600
+
+    # --- Notifications (dry-run unless NOTIFY_ENABLED=true) ---
+    notify_enabled: bool = False
+    notify_channels: str = "telegram"  # comma list: telegram,bale
+    notify_event_types: str = "BUYBOX_LOST,BUYBOX_REGAINED,ENTERED_CHALLENGE,STOCK_OUT,DEACTIVATED"
+    notify_cooldown_seconds: float = 1800
+    notify_quiet_start: str = ""  # "HH:MM", empty = no quiet hours
+    notify_quiet_end: str = ""
+    notify_timezone: str = "Asia/Tehran"
+    telegram_bot_token: SecretStr = SecretStr("")
+    telegram_chat_id: SecretStr = SecretStr("")
+    bale_bot_token: SecretStr = SecretStr("")
+    bale_chat_id: SecretStr = SecretStr("")
+    bale_api_base: str = ""  # UNVERIFIED: Bale Bot API base URL, must be provided by the user
+
     rate_limit_requests: int = 30
     rate_limit_period_seconds: float = 30
     max_concurrent: int = 3
@@ -108,8 +135,25 @@ class Settings(BaseModel):
             out.append("DIGIKALA_VARIANTS_PATH is empty (default is /open-api/v1/variants).")
         return out
 
+    def notify_problems(self) -> list[str]:
+        """Only relevant when NOTIFY_ENABLED=true."""
+        out = []
+        if not self.notify_enabled:
+            return out
+        for ch in [c.strip() for c in self.notify_channels.split(",") if c.strip()]:
+            if ch == "telegram":
+                if not self.telegram_bot_token.get_secret_value() or not self.telegram_chat_id.get_secret_value():
+                    out.append("Telegram is enabled but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.")
+            elif ch == "bale":
+                if not (self.bale_bot_token.get_secret_value() and self.bale_chat_id.get_secret_value()
+                        and self.bale_api_base):
+                    out.append("Bale is enabled but BALE_BOT_TOKEN, BALE_CHAT_ID or BALE_API_BASE is missing.")
+            else:
+                out.append(f"Unknown notification channel '{ch}' (use telegram or bale).")
+        return out
+
     def require_ok(self) -> None:
-        problems = self.problems()
+        problems = self.problems() + self.notify_problems()
         if problems:
             raise ConfigError("\n".join(problems))
 
@@ -147,6 +191,29 @@ def load_settings() -> Settings:
     put("page_size", "DIGIKALA_PAGE_SIZE", int)
     put("items_key", "DIGIKALA_ITEMS_KEY")
     put("field_map", "DIGIKALA_FIELD_MAP", json.loads)
+    def to_bool(v: str) -> bool:
+        return v.strip().lower() in ("1", "true", "yes", "on")
+
+    put("variants_extra_params", "DIGIKALA_VARIANTS_EXTRA_PARAMS", json.loads)
+    put("radar_hot_interval_seconds", "RADAR_HOT_INTERVAL_SECONDS", float)
+    put("radar_warm_interval_seconds", "RADAR_WARM_INTERVAL_SECONDS", float)
+    put("radar_calm_interval_seconds", "RADAR_CALM_INTERVAL_SECONDS", float)
+    put("radar_hot_lost_window_seconds", "RADAR_HOT_LOST_WINDOW_SECONDS", float)
+    put("radar_warm_event_window_seconds", "RADAR_WARM_EVENT_WINDOW_SECONDS", float)
+    put("radar_budget_fraction", "RADAR_BUDGET_FRACTION", float)
+    put("winning_price_cache_seconds", "WINNING_PRICE_CACHE_SECONDS", float)
+    put("notify_enabled", "NOTIFY_ENABLED", to_bool)
+    put("notify_channels", "NOTIFY_CHANNELS")
+    put("notify_event_types", "NOTIFY_EVENT_TYPES")
+    put("notify_cooldown_seconds", "NOTIFY_COOLDOWN_SECONDS", float)
+    put("notify_quiet_start", "NOTIFY_QUIET_START")
+    put("notify_quiet_end", "NOTIFY_QUIET_END")
+    put("notify_timezone", "NOTIFY_TIMEZONE")
+    put("telegram_bot_token", "TELEGRAM_BOT_TOKEN", SecretStr)
+    put("telegram_chat_id", "TELEGRAM_CHAT_ID", SecretStr)
+    put("bale_bot_token", "BALE_BOT_TOKEN", SecretStr)
+    put("bale_chat_id", "BALE_CHAT_ID", SecretStr)
+    put("bale_api_base", "BALE_API_BASE")
     put("rate_limit_requests", "RATE_LIMIT_REQUESTS", int)
     put("rate_limit_period_seconds", "RATE_LIMIT_PERIOD_SECONDS", float)
     put("max_concurrent", "MAX_CONCURRENT", int)

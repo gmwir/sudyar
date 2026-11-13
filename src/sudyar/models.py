@@ -67,3 +67,31 @@ class VariantSnapshot(Base):
     is_seller_buy_box_winner: Mapped[bool | None] = mapped_column(Boolean)
     is_in_buy_box_challenge: Mapped[bool | None] = mapped_column(Boolean)
     stock: Mapped[int | None] = mapped_column(Integer)
+    active: Mapped[bool | None] = mapped_column(Boolean)  # needed to detect DEACTIVATED
+
+
+class RadarEvent(Base):
+    """A change detected between two consecutive snapshots of one variant."""
+
+    __tablename__ = "radar_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    type: Mapped[str] = mapped_column(String(32), index=True)
+    old_value: Mapped[str | None] = mapped_column(String(200))
+    new_value: Mapped[str | None] = mapped_column(String(200))
+    details: Mapped[dict | None] = mapped_column(JSON)  # cause, gap, suggested_price, ...
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notify_status: Mapped[str | None] = mapped_column(String(32))
+
+
+class HotOverride(Base):
+    """Variants a human wants polled at the HOT rate no matter what."""
+
+    __tablename__ = "hot_overrides"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    note: Mapped[str | None] = mapped_column(String(500))

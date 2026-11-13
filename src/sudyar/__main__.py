@@ -6,29 +6,33 @@ import sys
 from .config import ConfigError, load_settings
 from .logging_setup import setup_logging
 
-USAGE = "Usage: python -m sudyar [check-config | sync-variants | buybox-status | winning-price <variant_id>]"
+USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
+         "winning-price <variant_id> | radar-once | radar-run]")
 
 
 def check_config() -> int:
     s = load_settings()
-    problems = s.problems()
+    problems = s.problems() + s.notify_problems()
     if problems:
         print("Configuration problems:")
         for p in problems:
             print(f" - {p}")
         return 1
     print("Configuration OK (token and password are present; values are not shown).")
+    print("Notifications: " + ("ENABLED" if s.notify_enabled else "DRY-RUN (messages are only printed, never sent)"))
     return 0
 
 
-def _build(s):
+def _build(s, radar: bool = False):
     from .db import make_call_logger, make_engine, make_session_factory
     from .digikala_client import DigikalaClient
     from .rate_limiter import LimiterConfig, RateLimiter
 
     factory = make_session_factory(make_engine(s.database_url))
+    # The radar only gets a share of the read limit (default 60%) so other calls always have room.
+    requests = max(1, int(s.rate_limit_requests * s.radar_budget_fraction)) if radar else s.rate_limit_requests
     limiter = RateLimiter(LimiterConfig(
-        requests=s.rate_limit_requests, period_seconds=s.rate_limit_period_seconds,
+        requests=requests, period_seconds=s.rate_limit_period_seconds,
         max_concurrent=s.max_concurrent, max_retries=s.max_retries,
         backoff_base=s.backoff_base_seconds, backoff_max=s.backoff_max_seconds,
         breaker_threshold=s.breaker_threshold, breaker_pause=s.breaker_pause_seconds,
@@ -69,6 +73,65 @@ def winning_price(variant_id: str) -> int:
     return 0
 
 
+def _print_cycle(res) -> None:
+    print(f"Tiers: " + ", ".join(f"{k}={v}" for k, v in res.tier_counts.items()))
+    print(f"Due this cycle: " + ", ".join(f"{k}={v}" for k, v in res.due_counts.items()))
+    print(f"Pages read: {len(res.pages_read)}")
+    for tier, (lo, hi) in res.estimates.items():
+        print(f"  estimated requests/min {tier}: {lo:.1f} - {hi:.1f}")
+    print(f"Events: {len(res.events)}")
+    for ev in res.events:
+        d = ev.details or {}
+        extra = f" cause={d['cause']}" if "cause" in d else ""
+        print(f"  {ev.type} variant={ev.variant_id} {ev.old_value}->{ev.new_value}{extra}")
+
+
+def _radar(s):
+    from .notifier import Dispatcher
+    from .radar import Radar
+
+    factory, client = _build(s, radar=True)
+    return client, Radar(client, factory, s, Dispatcher(s))
+
+
+def radar_once() -> int:
+    s = load_settings()
+    s.require_ok()
+    client, radar = _radar(s)
+
+    async def main():
+        async with client:
+            return await radar.run_cycle()
+
+    _print_cycle(asyncio.run(main()))
+    return 0
+
+
+def radar_run() -> int:
+    import time as _time
+
+    s = load_settings()
+    s.require_ok()
+    client, radar = _radar(s)
+
+    async def main():
+        async with client:
+            while True:
+                started = _time.monotonic()
+                try:
+                    res = await radar.run_cycle()
+                    print(f"[radar] pages={len(res.pages_read)} events={len(res.events)} tiers={res.tier_counts}", flush=True)
+                except Exception as e:  # keep the loop alive; message only, never headers/tokens
+                    print(f"[radar] cycle failed: {type(e).__name__}: {e}", flush=True)
+                await asyncio.sleep(max(1.0, s.radar_hot_interval_seconds - (_time.monotonic() - started)))
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Radar stopped.")
+    return 0
+
+
 def run_sync() -> int:
     from .sync import sync_variants
 
@@ -88,7 +151,7 @@ def run_sync() -> int:
 
 def main(argv: list[str]) -> int:
     setup_logging()
-    cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2}
+    cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1, "radar-run": 1}
     if not argv or cmds.get(argv[0]) != len(argv):
         print(USAGE)
         return 2
@@ -99,6 +162,10 @@ def main(argv: list[str]) -> int:
             return run_sync()
         if argv[0] == "buybox-status":
             return buybox_status()
+        if argv[0] == "radar-once":
+            return radar_once()
+        if argv[0] == "radar-run":
+            return radar_run()
         return winning_price(argv[1])
     except ConfigError as e:
         print(f"Cannot start:\n{e}")
