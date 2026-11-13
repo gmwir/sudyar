@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, UniqueConstraint, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -95,3 +95,52 @@ class HotOverride(Base):
     variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     note: Mapped[str | None] = mapped_column(String(500))
+
+
+class VariantCost(Base):
+    """Our purchase cost per variant (toman). Optional: the app works without any rows."""
+
+    __tablename__ = "variant_costs"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    buy_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = unknown
+    source: Mapped[str] = mapped_column(String(16))  # manual | excel
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class FloorSetting(Base):
+    """Profit-floor rule. Most specific scope wins: variant > brand > category > global."""
+
+    __tablename__ = "floor_settings"
+    __table_args__ = (UniqueConstraint("scope", "scope_key", name="uq_floor_settings_scope"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(16))  # global | brand | category | variant
+    scope_key: Mapped[str] = mapped_column(String(200), default="")  # "" for global
+    margin_pct: Mapped[float | None] = mapped_column(Float)  # net profit as % of selling price
+    min_profit_toman: Mapped[int | None] = mapped_column(BigInteger)
+    floor_manual_toman: Mapped[int | None] = mapped_column(BigInteger)
+    floor_manual_pct: Mapped[float | None] = mapped_column(Float)  # % of our current price
+
+
+class FloorEvent(Base):
+    """Audit trail: written when a variant's floor (or the reason for no floor) changes."""
+
+    __tablename__ = "floor_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    floor: Mapped[int | None] = mapped_column(BigInteger)  # effective floor (toman)
+    suggested_floor: Mapped[int | None] = mapped_column(BigInteger)  # computed from cost/fees
+    reason: Mapped[str] = mapped_column(String(200))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class FeeCache(Base):
+    """Fees read from Digikala (GET), cached so we never guess and never over-call."""
+
+    __tablename__ = "fee_cache"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

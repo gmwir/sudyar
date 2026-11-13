@@ -7,7 +7,8 @@ from .config import ConfigError, load_settings
 from .logging_setup import setup_logging
 
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
-         "winning-price <variant_id> | radar-once | radar-run]")
+         "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
+         "floor-report [--top N] [--fetch-fees N] | set-floor ... | healthcheck]")
 
 
 def check_config() -> int:
@@ -19,6 +20,10 @@ def check_config() -> int:
             print(f" - {p}")
         return 1
     print("Configuration OK (token and password are present; values are not shown).")
+    if s.price_unit not in ("rial", "toman"):
+        print("Note: DIGIKALA_PRICE_UNIT is not set (rial or toman). Profit floors cannot be compared with prices until it is.")
+    if not s.fees_field_map or not (s.fees_commission_path or s.fees_calculator_path):
+        print("Note: fee endpoints (FEES_*) are not configured, so floors will show 'needs_fees'.")
     print("Notifications: " + ("ENABLED" if s.notify_enabled else "DRY-RUN (messages are only printed, never sent)"))
     return 0
 
@@ -87,11 +92,13 @@ def _print_cycle(res) -> None:
 
 
 def _radar(s):
+    from .floor import FeeProvider, FloorEngine
     from .notifier import Dispatcher
     from .radar import Radar
 
     factory, client = _build(s, radar=True)
-    return client, Radar(client, factory, s, Dispatcher(s))
+    engine = FloorEngine(s, FeeProvider(client, s))
+    return client, Radar(client, factory, s, Dispatcher(s), engine)
 
 
 def radar_once() -> int:
@@ -132,6 +139,110 @@ def radar_run() -> int:
     return 0
 
 
+def healthcheck() -> int:
+    """Used by Docker HEALTHCHECK: database reachable? (No Digikala call, no secrets printed.)"""
+    from sqlalchemy import text
+
+    from .db import make_engine
+
+    try:
+        s = load_settings()
+        with make_engine(s.database_url).connect() as c:
+            c.execute(text("SELECT 1"))
+    except Exception as e:
+        print(f"unhealthy: {type(e).__name__}")
+        return 1
+    print("healthy")
+    return 0
+
+
+def import_costs_cmd(args: list[str]) -> int:
+    from .cost_import import CostImportError, import_costs
+    from .db import make_engine, make_session_factory
+
+    dry = "--dry-run" in args
+    files = [a for a in args if a != "--dry-run"]
+    if len(files) != 1:
+        print("Usage: python -m sudyar import-costs FILE.xlsx|FILE.csv [--dry-run]")
+        return 2
+    s = load_settings()
+    s.require_ok()
+    try:
+        with make_session_factory(make_engine(s.database_url))() as session:
+            res = import_costs(session, files[0], s, dry_run=dry)
+    except CostImportError as e:
+        print(f"Import failed: {e}")
+        return 1
+    print(("DRY-RUN (nothing saved). " if dry else "") +
+          f"New: {res.created}, updated: {res.updated}, unchanged: {res.unchanged}, rejected: {len(res.rejected)}")
+    for rownum, why in res.rejected[:50]:
+        print(f"  rejected row {rownum}: {why}")
+    if len(res.rejected) > 50:
+        print(f"  ... and {len(res.rejected) - 50} more rejected rows")
+    return 0
+
+
+def floor_report_cmd(args: list[str]) -> int:
+    from .floor import FeeProvider, FloorEngine
+    from .floor_report import build_report, format_report
+    from .models import Variant, utcnow
+
+    def opt(name: str, default: int) -> int:
+        return int(args[args.index(name) + 1]) if name in args else default
+
+    top, fetch = opt("--top", 20), opt("--fetch-fees", 0)
+    s = load_settings()
+    s.require_ok()
+    factory, client = _build(s)
+    engine = FloorEngine(s, FeeProvider(client if fetch else None, s))
+
+    async def main():
+        now = utcnow()
+        with factory() as session:
+            if fetch:  # explicit, bounded, rate-limited GETs; off by default
+                from sqlalchemy import select
+                async with client:
+                    n = 0
+                    for v in session.scalars(select(Variant).where(Variant.active.is_(True))):
+                        if n >= fetch:
+                            break
+                        if await engine.fees.get(session, v, now, allow_fetch=False) is None:
+                            await engine.fees.get(session, v, now, allow_fetch=True)
+                            n += 1
+                    session.commit()
+            return await build_report(session, engine, now, top)
+
+    print(format_report(asyncio.run(main())))
+    return 0
+
+
+def set_floor_cmd(args: list[str]) -> int:
+    """set-floor --scope global|brand|category|variant [--key K] [--margin-pct N] [--min-profit N]
+    [--manual-toman N] [--manual-pct N]   (writes only our own database)"""
+    from .db import make_engine, make_session_factory
+    from .floor import set_floor_rule
+
+    def val(name: str, cast=float):
+        return cast(args[args.index(name) + 1]) if name in args else None
+
+    try:
+        scope = val("--scope", str) or "global"
+        key = val("--key", str) or ""
+        s = load_settings()
+        s.require_ok()
+        with make_session_factory(make_engine(s.database_url))() as session:
+            row = set_floor_rule(session, scope, key, margin_pct=val("--margin-pct"),
+                                 min_profit_toman=val("--min-profit", int),
+                                 floor_manual_toman=val("--manual-toman", int),
+                                 floor_manual_pct=val("--manual-pct"))
+    except (ValueError, IndexError) as e:
+        print(f"Invalid options: {e}")
+        return 2
+    print(f"Saved rule {row.scope}/{row.scope_key or '-'}: margin%={row.margin_pct}, min_profit={row.min_profit_toman}, "
+          f"manual_toman={row.floor_manual_toman}, manual%={row.floor_manual_pct}")
+    return 0
+
+
 def run_sync() -> int:
     from .sync import sync_variants
 
@@ -151,11 +262,21 @@ def run_sync() -> int:
 
 def main(argv: list[str]) -> int:
     setup_logging()
-    cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1, "radar-run": 1}
-    if not argv or cmds.get(argv[0]) != len(argv):
+    cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
+            "radar-run": 1, "healthcheck": 1}
+    free = ("import-costs", "floor-report", "set-floor")  # take options
+    if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2
     try:
+        if argv[0] == "import-costs":
+            return import_costs_cmd(argv[1:])
+        if argv[0] == "floor-report":
+            return floor_report_cmd(argv[1:])
+        if argv[0] == "set-floor":
+            return set_floor_cmd(argv[1:])
+        if argv[0] == "healthcheck":
+            return healthcheck()
         if argv[0] == "check-config":
             return check_config()
         if argv[0] == "sync-variants":

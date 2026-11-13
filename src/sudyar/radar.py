@@ -115,8 +115,10 @@ class CycleResult:
 
 
 class Radar:
-    def __init__(self, client: DigikalaClient, factory: sessionmaker[Session], settings: Settings, dispatcher=None):
+    def __init__(self, client: DigikalaClient, factory: sessionmaker[Session], settings: Settings, dispatcher=None,
+                 floor_engine=None):
         self.client, self.factory, self.s, self.dispatcher = client, factory, settings, dispatcher
+        self.floor_engine = floor_engine  # optional; suggestions only
         self.state = RadarState()
         self._wp_cache: dict[str, tuple[datetime, int | None]] = {}
 
@@ -134,6 +136,16 @@ class Radar:
             return None
         self._wp_cache[product_variant_id] = (now, price)
         return price
+
+    async def _assess_floor(self, session: Session, row: Variant, suggested: int | None, data: dict, now: datetime):
+        """Label the loss against our profit floor. Never fails the cycle; never changes prices."""
+        if self.floor_engine is None:
+            return None
+        try:
+            return await self.floor_engine.assess_loss(session, row, suggested, data["buy_box_price"], now)
+        except Exception as e:
+            log.warning("floor assessment failed: %s", type(e).__name__)
+            return None
 
     def _needs_full(self, now: datetime) -> bool:
         last = self.state.last_full_read_at
@@ -162,6 +174,8 @@ class Radar:
             if etype == BUYBOX_LOST:
                 details.update(determine_cause(data))
                 details["suggested_price"] = await self._suggested_price(data["product_variant_id"], now)
+                if self.floor_engine is not None:
+                    details["floor"] = await self._assess_floor(session, row, details["suggested_price"], data, now)
             ev = insert_event(session, row, prev.id, etype, old, new, details, now)
             if ev is not None:
                 events.append(ev)

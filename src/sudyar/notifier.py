@@ -44,6 +44,30 @@ def _pct(v) -> str:
     return UNKNOWN_FA if v is None else f"{v:.1f}٪"
 
 
+FLOOR_LABEL_FA = {
+    "can_win_above_floor": "می‌توان بالاتر از کف قیمت برنده شد",
+    "would_need_below_floor": "برای برنده شدن باید پایین‌تر از کف قیمت رفت",
+    "needs_cost": "قیمت خرید ثبت نشده",
+    "needs_fees": "کارمزدها از دیجی‌کالا در دسترس نیست",
+    "needs_unit": "واحد قیمت (ریال/تومان) تنظیم نشده",
+    "no_rule": "قانون کف قیمت تنظیم نشده",
+    "impossible": "با این حاشیه سود کف قیمت قابل محاسبه نیست",
+    "unknown": UNKNOWN_FA,
+}
+
+
+def _floor_lines(d: dict) -> str:
+    f = d.get("floor")
+    if not f:
+        return ""
+    floor = f.get("floor_toman")
+    win = f.get("win_price_toman")
+    return (f"\nکف قیمت: {_n(floor)} تومان"
+            f"\nقیمت لازم برای برد: {_n(None if win is None else int(win))} تومان"
+            f"\nارزیابی: {FLOOR_LABEL_FA.get(f.get('label'), UNKNOWN_FA)}"
+            "\nفقط پیشنهاد است؛ هیچ قیمتی تغییر نمی‌کند.")
+
+
 def render_message(ev: RadarEvent) -> str:
     d = ev.details or {}
     title = d.get("title") or UNKNOWN_FA
@@ -55,7 +79,7 @@ def render_message(ev: RadarEvent) -> str:
         return (f"🔴 باکس خرید را از دست دادید\n{head}\n{prices}\n"
                 f"فاصله: {_pct(d.get('gap_pct'))} ({_n(d.get('gap_abs'))})\n"
                 f"قیمت پیشنهادی: {_n(d.get('suggested_price'))}\n"
-                f"علت: {CAUSE_FA.get(d.get('cause', 'unknown'), UNKNOWN_FA)}\n{unit}")
+                f"علت: {CAUSE_FA.get(d.get('cause', 'unknown'), UNKNOWN_FA)}{_floor_lines(d)}\n{unit}")
     if t == "BUYBOX_REGAINED":
         return f"🟢 باکس خرید را پس گرفتید\n{head}\n{prices}\n{unit}"
     if t == "ENTERED_CHALLENGE":
