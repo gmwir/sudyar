@@ -1,6 +1,7 @@
 """floor-report: read-only look at profit vs floor, from our own database (no API calls)."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from .floor import COMPONENTS, OK, FloorEngine, resolve_components, to_toman
 from .models import Variant
 from .sales import load_sales, sales_synced_at
 
+log = logging.getLogger(__name__)
 SALES_RANGE_DEFAULT = "last_30_days"
 
 
@@ -29,9 +31,35 @@ class FloorReport:
     sales_synced: datetime | None = None
     fees_synced: datetime | None = None
     fees_assumed_max_brand: int = 0
+    fees_assumed_single_brand: int = 0
+    errors: int = 0  # variants skipped because evaluating them raised
     price_unit: str = ""
     include_extra: bool = False
     include_return_free: bool = False
+
+
+async def _check_variant(session, engine, v, now, sales, rep, low, below) -> None:
+    s = engine.s
+    res = await engine.evaluate(session, v, now, allow_fetch=False)
+    comps = resolve_components(session, v, s)
+    profit = await engine.profit_now(session, v, now, allow_fetch=False)
+    win = to_toman(v.buy_box_price, s.price_unit)
+    # all computations succeeded: only now touch the report counters
+    rep.status_counts[res.status] = rep.status_counts.get(res.status, 0) + 1
+    if res.fee_reason == "fee_assumed_max_brand":
+        rep.fees_assumed_max_brand += 1
+    elif res.fee_reason == "fee_assumed_single_brand":
+        rep.fees_assumed_single_brand += 1
+    for c in comps.included:
+        rep.component_set[c] += 1
+    if profit is not None and profit <= 0:
+        rep.low_profit_total += 1
+        sale = sales.get(str(v.product_id)) if v.product_id is not None else None
+        if sale is not None and (sale.net_item_sold or 0) > 0:
+            low.append((v, sale.net_item_sold, sale.net_sales_amount, profit))
+    if res.status == OK and res.floor_toman is not None and v.is_seller_buy_box_winner is False:
+        if win is not None and win < res.floor_toman:
+            below.append((v, win, res.floor_toman, res.floor_toman - win))
 
 
 async def build_report(session: Session, engine: FloorEngine, now: datetime, top: int = 20,
@@ -47,23 +75,12 @@ async def build_report(session: Session, engine: FloorEngine, now: datetime, top
     low, below = [], []
     for v in session.scalars(select(Variant).where(Variant.active.is_(True))):
         rep.checked += 1
-        res = await engine.evaluate(session, v, now, allow_fetch=False)
-        rep.status_counts[res.status] = rep.status_counts.get(res.status, 0) + 1
-        if res.fee_reason == "fee_assumed_max_brand":
-            rep.fees_assumed_max_brand += 1
-        comps = resolve_components(session, v, s)
-        for c in comps.included:
-            rep.component_set[c] += 1
-        profit = await engine.profit_now(session, v, now, allow_fetch=False)
-        if profit is not None and profit <= 0:
-            rep.low_profit_total += 1
-            sale = sales.get(str(v.product_id)) if v.product_id is not None else None
-            if sale is not None and (sale.net_item_sold or 0) > 0:
-                low.append((v, sale.net_item_sold, sale.net_sales_amount, profit))
-        if res.status == OK and res.floor_toman is not None and v.is_seller_buy_box_winner is False:
-            win = to_toman(v.buy_box_price, s.price_unit)
-            if win is not None and win < res.floor_toman:
-                below.append((v, win, res.floor_toman, res.floor_toman - win))
+        try:  # one bad row (e.g. a corrupt rule or price) must never crash the whole report
+            await _check_variant(session, engine, v, now, sales, rep, low, below)
+        except Exception as e:
+            rep.errors += 1
+            rep.status_counts["error"] = rep.status_counts.get("error", 0) + 1
+            log.warning("floor-report skipped variant %s: %s", v.digikala_variant_id, type(e).__name__)
     rep.sells_low_profit = sorted(low, key=lambda x: (-x[1], x[3]))[:top]
     rep.below_floor = sorted(below, key=lambda x: -x[3])[:top]
     return rep
@@ -97,10 +114,15 @@ def format_report(rep: FloorReport) -> str:
     if rep.fees_assumed_max_brand:
         L.append(f"  commission: {rep.fees_assumed_max_brand} variants use the HIGHEST brand commission of their category "
                  "(fee_assumed_max_brand) because no brand is set (set-brand).")
+    if rep.fees_assumed_single_brand:
+        L.append(f"  commission: {rep.fees_assumed_single_brand} variants use the only brand row of their category "
+                 "(fee_assumed_single_brand): that is ONE brand's rate, not the category rate.")
     L.append("")
     L.append("Floor status:")
     for k, n in sorted(rep.status_counts.items()):
         L.append(f"  {k}: {n}")
+    if rep.errors:
+        L.append(f"  error: {rep.errors} variants could not be evaluated and were skipped (SUDYAR_DEBUG=1 for details)")
     L.append("")
     L.append(f"Variants with zero/negative profit at the current price: {rep.low_profit_total}")
     L.append(f"Of those, SELLING (net_item_sold > 0, {rep.range}), most units first: {len(rep.sells_low_profit)} shown")

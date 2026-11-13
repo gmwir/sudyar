@@ -92,6 +92,9 @@ def compute_floor(buy_cost_toman: float, commission_pct: float, comps: Component
     """Smallest price (Toman) with profit >= max(min_profit, margin% of price). None if impossible."""
     if margin_pct is None and min_profit_toman is None:
         return None, "no_margin_or_min_profit"
+    if not all(math.isfinite(x) for x in (buy_cost_toman, commission_pct, margin_pct or 0, min_profit_toman or 0,
+                                           comps.total_pct, comps.total_toman)):
+        return None, "invalid_input"
     var = (commission_pct + comps.total_pct) / 100
     fixed = buy_cost_toman + comps.total_toman
     m = (margin_pct or 0) / 100
@@ -113,6 +116,10 @@ def _field(raw: dict | None, dotted: str) -> str | None:
             return None
         v = v.get(part)
     return None if v is None or isinstance(v, (dict, list, bool)) else str(v)
+
+
+def _pos_finite(v: float | int | None) -> bool:
+    return v is not None and not isinstance(v, bool) and math.isfinite(v) and v > 0
 
 
 def variant_brand_id(session: Session, variant: Variant) -> str | None:
@@ -202,15 +209,19 @@ class FloorEngine:
         cost_row = session.get(VariantCost, variant.id)
         cost = cost_row.buy_cost if cost_row is not None else None
         manual = []
-        if setting.floor_manual_toman is not None:
+        # Only positive, finite manual values count (older/hand-edited rows with 0, NaN or inf are ignored).
+        if _pos_finite(setting.floor_manual_toman):
             manual.append(setting.floor_manual_toman)
-        if setting.floor_manual_pct is not None:
+        if _pos_finite(setting.floor_manual_pct):
             cur_toman = to_toman(variant.price_sale, self.s.price_unit)
             if cur_toman is not None:
                 manual.append(math.ceil(cur_toman * setting.floor_manual_pct / 100))
-            elif setting.floor_manual_toman is None:
+            elif not manual:
                 return FloorResult(NEEDS_UNIT, reason="manual % floor needs DIGIKALA_PRICE_UNIT", scope=setting.scope)
         manual_floor = max(manual) if manual else None
+        raised = False
+        if manual_floor is not None and cost is not None and manual_floor < cost:
+            manual_floor, raised = cost, True  # a manual floor can never be below the known buy cost
 
         if cost is None:  # never guess a cost
             if manual_floor is not None:
@@ -218,13 +229,14 @@ class FloorEngine:
             return FloorResult(NEEDS_COST, reason="buy_cost missing", scope=setting.scope)
         if setting.margin_pct is None and setting.min_profit_toman is None:
             if manual_floor is not None:
-                return FloorResult(OK, manual_floor, None, "manual_floor", setting.scope)
+                return FloorResult(OK, manual_floor, None, "manual_floor_raised_to_cost" if raised else "manual_floor",
+                                   setting.scope)
             return FloorResult(NO_RULE, reason="rule has no margin/min profit", scope=setting.scope)
 
         fees = await self._fees_for(session, variant, now, allow_fetch)
         if fees is None:
-            return FloorResult(NEEDS_FEES, reason="no commission row for this variant's category (run sync-fees)",
-                               scope=setting.scope)
+            category = _field(variant.raw_json, self.s.floor_category_field)
+            return FloorResult(NEEDS_FEES, reason=self.fees.miss_reason(session, category, now), scope=setting.scope)
         comps = resolve_components(session, variant, self.s)
         computed, why = compute_floor(cost, fees.commission_pct, comps, setting.margin_pct, setting.min_profit_toman)
         base = dict(scope=setting.scope, fee_reason=fees.reason, commission_pct=fees.commission_pct,
@@ -293,22 +305,42 @@ RULE_FIELDS = ("margin_pct", "min_profit_toman", "floor_manual_toman", "floor_ma
 COMPONENT_FIELDS = tuple(f"{c}_{u}" for c in COMPONENTS for u in ("pct", "toman"))
 
 
+MAX_TOMAN = 10**12  # 1 trillion Toman: far above any real price, far below database limits
+MAX_MANUAL_PCT = 1000.0  # a manual floor may exceed the current price, but not absurdly
+
+
+def _check_value(name: str, v: float | int) -> None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError(f"{name} must be a finite number")
+    if name in ("floor_manual_toman", "floor_manual_pct"):
+        if v <= 0:
+            raise ValueError(f"{name} must be greater than 0 (a manual floor of 0 means nothing)")
+    elif v < 0:
+        raise ValueError(f"{name} must not be negative")
+    if name == "floor_manual_pct":
+        if v > MAX_MANUAL_PCT:
+            raise ValueError(f"{name} must be at most {MAX_MANUAL_PCT:g}")
+    elif name.endswith("_pct"):
+        if v >= 100:
+            raise ValueError(f"{name} must be below 100")
+    elif v > MAX_TOMAN:
+        raise ValueError(f"{name} must be at most {MAX_TOMAN:,} Toman")
+
+
 def set_floor_rule(session: Session, scope: str, key: str = "", **values: float | None) -> FloorSetting:
     """Create/update one rule (idempotent). Only the values given are changed. Component scopes are
-    global/category (variant/brand also accepted). Unknown names are rejected."""
+    global/category (variant/brand also accepted). Unknown or non-finite/out-of-range values are rejected."""
     if scope not in SCOPES:
         raise ValueError(f"scope must be one of {SCOPES}")
     if scope != "global" and not key:
         raise ValueError(f"scope '{scope}' needs a key (variant id / brand_id / category_id)")
+    if len(str(key)) > 200:
+        raise ValueError("key is too long")
     for name, v in values.items():
         if name not in RULE_FIELDS + COMPONENT_FIELDS:
             raise ValueError(f"unknown setting '{name}'")
-        if v is not None and v < 0:
-            raise ValueError(f"{name} must not be negative")
-        if v is not None and name.endswith("_pct") and name != "floor_manual_pct" and v >= 100:
-            raise ValueError(f"{name} must be below 100")
-    if (values.get("margin_pct") or 0) >= 100:
-        raise ValueError("margin_pct must be below 100")
+        if v is not None:
+            _check_value(name, v)
     key = "" if scope == "global" else str(key)
     row = session.scalar(select(FloorSetting).where(FloorSetting.scope == scope, FloorSetting.scope_key == key))
     if row is None:

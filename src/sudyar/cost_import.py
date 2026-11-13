@@ -61,6 +61,8 @@ def parse_cost(value: Any) -> int:
         raise ValueError("buy_cost must be a whole number (Toman)")
     if num <= 0:
         raise ValueError("buy_cost must be greater than 0")
+    if num > 10**12:
+        raise ValueError("buy_cost is unrealistically large (more than 1,000,000,000,000 Toman)")
     return int(num)
 
 

@@ -65,7 +65,7 @@ async def test_loss_labeled_would_need_below_floor(make_limiter):
     res = await radar.run_cycle(T0 + timedelta(hours=1, seconds=5))   # suggested 950 RIAL = 95 toman
     f = next(e for e in res.events if e.type == "BUYBOX_LOST").details["floor"]
     assert f["floor_toman"] == 750 and f["label"] == "would_need_below_floor" and f["win_price_toman"] == 95
-    assert f["fee_reason"] == "fee_category_row" and f["commission_pct"] == 10.0
+    assert f["fee_reason"] == "fee_assumed_single_brand" and f["commission_pct"] == 10.0
 
 
 async def test_loss_labeled_can_win_when_suggestion_high(make_limiter):

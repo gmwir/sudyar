@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .config import Settings
+from .config import Settings, check_bale_base
 from .models import RadarEvent
 from .tiers import aware
 
@@ -167,7 +167,8 @@ def build_notifiers(s: Settings, transport: httpx.AsyncBaseTransport | None = No
         if ch == "telegram" and s.telegram_bot_token.get_secret_value():
             out[ch] = TelegramNotifier(s.telegram_bot_token.get_secret_value(),
                                        s.telegram_chat_id.get_secret_value(), transport)
-        elif ch == "bale" and s.bale_bot_token.get_secret_value() and s.bale_api_base:
+        elif (ch == "bale" and s.bale_bot_token.get_secret_value() and s.bale_api_base
+              and check_bale_base(s.bale_api_base, s.bale_allowed_hosts) is None):  # never send to other hosts
             out[ch] = BaleNotifier(s.bale_api_base, s.bale_bot_token.get_secret_value(),
                                    s.bale_chat_id.get_secret_value(), transport)
     return out

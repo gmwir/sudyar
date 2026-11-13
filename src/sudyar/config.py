@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, Field, SecretStr
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
 from sqlalchemy.engine import URL
 
 
@@ -50,6 +53,37 @@ def load_dotenv(path: str | Path = ".env") -> None:
             continue
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+PATH_FIELDS = ("variants_path", "commissions_path", "sales_reports_path", "buybox_price_path", "nth_rank_price_path")
+DAY = 86_400
+NUMERIC_RANGES: dict[str, tuple[float, float]] = {
+    "postgres_port": (1, 65535), "page_size": (1, 1000),
+    "rate_limit_requests": (1, 10_000), "rate_limit_period_seconds": (0.001, DAY),
+    "max_concurrent": (1, 100), "max_retries": (0, 20),
+    "backoff_base_seconds": (0, 3600), "backoff_max_seconds": (0, DAY),
+    "breaker_threshold": (1, 1000), "breaker_pause_seconds": (0, DAY),
+    "radar_hot_interval_seconds": (1, 7 * DAY), "radar_warm_interval_seconds": (1, 7 * DAY),
+    "radar_calm_interval_seconds": (1, 7 * DAY), "radar_hot_lost_window_seconds": (0, 30 * DAY),
+    "radar_warm_event_window_seconds": (0, 30 * DAY), "radar_budget_fraction": (0.01, 1.0),
+    "winning_price_cache_seconds": (0, DAY), "notify_cooldown_seconds": (0, 7 * DAY),
+    "fees_cache_seconds": (0, 30 * DAY), "fees_max_pages": (1, 10_000), "fees_max_drop_pct": (0, 100),
+    "fees_max_stale_days": (0, 365), "sales_cache_seconds": (0, 30 * DAY), "sales_max_pages": (1, 1000),
+}
+ENV_NAMES = {"base_url": "DIGIKALA_BASE_URL", "variants_path": "DIGIKALA_VARIANTS_PATH",
+             "commissions_path": "FEES_COMMISSIONS_PATH", "sales_reports_path": "SALES_REPORTS_PATH",
+             "price_unit": "DIGIKALA_PRICE_UNIT", "suggested_price_unit": "DIGIKALA_SUGGESTED_PRICE_UNIT"}
+
+
+def check_bale_base(url: str, allowed_hosts: str) -> str | None:
+    """None if the Bale base URL is https and on the allow-list, else a short reason."""
+    p = urlsplit(url or "")
+    hosts = {h.strip().lower() for h in allowed_hosts.split(",") if h.strip()}
+    if p.scheme != "https" or not p.hostname or p.username or p.password:
+        return "BALE_API_BASE must be an https:// URL"
+    if p.hostname.lower() not in hosts:
+        return f"BALE_API_BASE host is not in BALE_ALLOWED_HOSTS ({', '.join(sorted(hosts)) or 'empty'})"
+    return None
 
 
 class Settings(BaseModel):
@@ -101,6 +135,8 @@ class Settings(BaseModel):
     bale_bot_token: SecretStr = SecretStr("")
     bale_chat_id: SecretStr = SecretStr("")
     bale_api_base: str = ""  # UNVERIFIED: Bale Bot API base URL, must be provided by the user
+    # Only these hosts may receive Bale alerts (UNVERIFIED: check Bale's docs; add hosts here if needed).
+    bale_allowed_hosts: str = "tapi.bale.ai"
 
     # --- Profit floor (Parts 3 / 3b) ---
     # Per the official Swagger: Digikala prices and winning-price suggested_price are in RIAL.
@@ -121,6 +157,9 @@ class Settings(BaseModel):
     sales_cache_seconds: float = 86400
     sales_max_pages: int = 50
     # Variant list items have category_id and supplier_code (used as SKU). They have NO brand field.
+    # Safety nets for the commissions table
+    fees_max_drop_pct: float = 30  # refuse a sync that has this % fewer rows than the last good one
+    fees_max_stale_days: float = 3  # commissions older than this (refresh keeps failing) -> needs_fees
     floor_category_field: str = "category_id"
     cost_sku_field: str = "supplier_code"
 
@@ -132,6 +171,44 @@ class Settings(BaseModel):
     backoff_max_seconds: float = 60
     breaker_threshold: int = 3
     breaker_pause_seconds: float = 300
+
+    # ---------- validation (config is untrusted input too) ----------
+    @field_validator("base_url")
+    @classmethod
+    def _https_base(cls, v: str) -> str:
+        p = urlsplit(v)
+        if p.scheme != "https" or not p.hostname or p.username or p.password or p.query or p.fragment:
+            raise ValueError("must be an https:// URL without credentials, query or fragment")
+        return v.rstrip("/")
+
+    @field_validator(*PATH_FIELDS)
+    @classmethod
+    def _api_path(cls, v: str, info) -> str:
+        if v == "" and info.field_name == "variants_path":
+            return v  # reported by problems()
+        if (not v.startswith("/") or v.startswith("//") or "://" in v or "\\" in v
+                or ".." in v.split("/") or "?" in v or "#" in v or any(c.isspace() for c in v)):
+            raise ValueError("must be a path starting with a single '/' (no host, no '..', no query)")
+        return v
+
+    @field_validator("price_unit", "suggested_price_unit")
+    @classmethod
+    def _unit(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("rial", "toman", "unknown"):
+            raise ValueError("must be rial or toman")
+        return v
+
+    @model_validator(mode="after")
+    def _numbers_are_sane(self):
+        for name, value in self:
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+        for name, (lo, hi) in NUMERIC_RANGES.items():
+            v = getattr(self, name)
+            if isinstance(v, bool) or not (lo <= v <= hi):
+                raise ValueError(f"{name} must be between {lo} and {hi}")
+        return self
 
     @property
     def database_url(self) -> str:
@@ -170,6 +247,10 @@ class Settings(BaseModel):
                 if not (self.bale_bot_token.get_secret_value() and self.bale_chat_id.get_secret_value()
                         and self.bale_api_base):
                     out.append("Bale is enabled but BALE_BOT_TOKEN, BALE_CHAT_ID or BALE_API_BASE is missing.")
+                else:
+                    why = check_bale_base(self.bale_api_base, self.bale_allowed_hosts)
+                    if why:
+                        out.append(why)
             else:
                 out.append(f"Unknown notification channel '{ch}' (use telegram or bale).")
         return out
@@ -248,6 +329,9 @@ def load_settings() -> Settings:
     put("sales_reports_path", "SALES_REPORTS_PATH")
     put("sales_cache_seconds", "SALES_CACHE_SECONDS", float)
     put("sales_max_pages", "SALES_MAX_PAGES", int)
+    put("fees_max_drop_pct", "FEES_MAX_DROP_PCT", float)
+    put("fees_max_stale_days", "FEES_MAX_STALE_DAYS", float)
+    put("bale_allowed_hosts", "BALE_ALLOWED_HOSTS")
     put("floor_category_field", "FLOOR_CATEGORY_FIELD")
     put("cost_sku_field", "COST_SKU_FIELD")
     put("rate_limit_requests", "RATE_LIMIT_REQUESTS", int)
@@ -258,4 +342,11 @@ def load_settings() -> Settings:
     put("backoff_max_seconds", "BACKOFF_MAX_SECONDS", float)
     put("breaker_threshold", "BREAKER_THRESHOLD", int)
     put("breaker_pause_seconds", "BREAKER_PAUSE_SECONDS", float)
-    return Settings(**kw)
+    try:
+        return Settings(**kw)
+    except ValidationError as e:  # report field + rule only, never the offending value
+        msgs = []
+        for err in e.errors():
+            loc = str(err["loc"][0]) if err["loc"] else "settings"
+            msgs.append(f"{ENV_NAMES.get(loc, loc.upper())}: {err['msg'].removeprefix('Value error, ')}")
+        raise ConfigError("Invalid configuration:\n - " + "\n - ".join(msgs)) from None

@@ -4,17 +4,41 @@ import asyncio
 import sys
 
 from .config import ConfigError, load_settings
-from .logging_setup import setup_logging
+from .logging_setup import error_code, setup_logging, short_error
 
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
-         "floor-report [--top N] [--range R] | sync-fees | sales-sync --range last_30_days [--category-id N] "
+         "floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
          "[--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
+
+
+READ_ONLY_SCOPES = (
+    ("variants", "GET /open-api/v1/variants"),
+    ("pricing/buybox", "GET /open-api/v1/pricing/buybox/price-suggestion/winning-price (and nth-rank-winning-price)"),
+    ("commissions", "GET /open-api/v1/commissions/"),
+    ("insight", "GET /open-api/v1/insight/sales-reports"),
+)
+
+
+def env_file_warning(path: str = ".env") -> str | None:
+    """Warn if the .env file (with the token) can be read by other users on this machine (Linux/Mac)."""
+    import os
+    import stat
+
+    if os.name == "nt" or not os.path.isfile(path):
+        return None
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if mode & 0o077:
+        return f".env is readable by other users (mode {mode:03o}). Run: chmod 600 .env"
+    return None
 
 
 def check_config() -> int:
     s = load_settings()
     problems = s.problems() + s.notify_problems()
+    warn = env_file_warning()
+    if warn:
+        print(f"WARNING: {warn}")
     if problems:
         print("Configuration problems:")
         for p in problems:
@@ -23,6 +47,9 @@ def check_config() -> int:
     print("Configuration OK (token and password are present; values are not shown).")
     if s.price_unit not in ("rial", "toman"):
         print("Note: DIGIKALA_PRICE_UNIT is not set (rial or toman). Profit floors cannot be compared with prices until it is.")
+    print("Token scopes needed (create the Self Token with READ-ONLY access to exactly these; no write scope is needed):")
+    for scope, what in READ_ONLY_SCOPES:
+        print(f"  - {scope}: {what}")
     print("Notifications: " + ("ENABLED" if s.notify_enabled else "DRY-RUN (messages are only printed, never sent)"))
     return 0
 
@@ -128,7 +155,7 @@ def radar_run() -> int:
                     res = await radar.run_cycle()
                     print(f"[radar] pages={len(res.pages_read)} events={len(res.events)} tiers={res.tier_counts}", flush=True)
                 except Exception as e:  # keep the loop alive; message only, never headers/tokens
-                    print(f"[radar] cycle failed: {type(e).__name__}: {e}", flush=True)
+                    print(f"[radar] cycle failed: {short_error(e)}", flush=True)
                 await asyncio.sleep(max(1.0, s.radar_hot_interval_seconds - (_time.monotonic() - started)))
 
     try:
@@ -182,9 +209,13 @@ def import_costs_cmd(args: list[str]) -> int:
 
 
 def _api_hint(e: Exception) -> str:
-    msg = f"{type(e).__name__}: {e}"
-    if "status 401" in msg or "status 403" in msg:
-        msg += "  (check the Self Token scopes: sync-fees needs 'commission', sales-sync needs 'insight')"
+    from .fees import FeeSyncRefused
+
+    if isinstance(e, FeeSyncRefused):  # our own message: no external data in it
+        return f"{e}"
+    msg = short_error(e)
+    if error_code(e) in ("HTTP-401", "HTTP-403"):
+        msg += "  (check the Self Token scopes: sync-fees needs 'commissions', sales-sync needs 'insight')"
     return msg
 
 
@@ -192,7 +223,7 @@ def _opt(args: list[str], name: str, cast=str, default=None):
     return cast(args[args.index(name) + 1]) if name in args else default
 
 
-def sync_fees_cmd() -> int:
+def sync_fees_cmd(args: list[str]) -> int:
     from .fees import sync_commissions
     from .models import utcnow
 
@@ -203,7 +234,7 @@ def sync_fees_cmd() -> int:
     async def main():
         async with client:
             with factory() as session:
-                return await sync_commissions(client, session, s, utcnow())
+                return await sync_commissions(client, session, s, utcnow(), force="--force" in args)
 
     try:
         r = asyncio.run(main())
@@ -211,6 +242,8 @@ def sync_fees_cmd() -> int:
         print(f"sync-fees failed: {_api_hint(e)}")
         return 1
     print(f"Commissions saved: {r.rows} rows ({r.pages} pages), rejected: {len(r.rejected or [])}")
+    if r.partial_categories:
+        print(f"WARNING: {r.partial_categories} categories had invalid rows; no floor is computed for them until fixed.")
     for line in (r.rejected or [])[:20]:
         print(f"  rejected {line}")
     return 0
@@ -252,6 +285,10 @@ def floor_report_cmd(args: list[str]) -> int:
     from .floor_report import build_report, format_report
     from .models import utcnow
 
+    top = _opt(args, "--top", int, 20)
+    if not 1 <= top <= 1000:
+        print("Invalid options: --top must be between 1 and 1000")
+        return 2
     s = load_settings()
     s.require_ok()
     factory, _ = _build(s)
@@ -259,7 +296,7 @@ def floor_report_cmd(args: list[str]) -> int:
 
     async def main():
         with factory() as session:
-            return await build_report(session, engine, utcnow(), _opt(args, "--top", int, 20),
+            return await build_report(session, engine, utcnow(), top,
                                       _opt(args, "--range", str, "last_30_days"))
 
     print(format_report(asyncio.run(main())))
@@ -354,8 +391,7 @@ def main(argv: list[str]) -> int:
     setup_logging()
     cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
-    cmds.update({"sync-fees": 1})
-    free = ("import-costs", "floor-report", "set-floor", "sales-sync", "set-brand", "list-brands")  # take options
+    free = ("sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "set-brand", "list-brands")  # take options
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2
@@ -373,7 +409,7 @@ def main(argv: list[str]) -> int:
         if argv[0] == "list-brands":
             return list_brands_cmd(argv[1:])
         if argv[0] == "sync-fees":
-            return sync_fees_cmd()
+            return sync_fees_cmd(argv[1:])
         if argv[0] == "healthcheck":
             return healthcheck()
         if argv[0] == "check-config":
@@ -391,7 +427,7 @@ def main(argv: list[str]) -> int:
         print(f"Cannot start:\n{e}")
         return 1
     except Exception as e:  # never print headers/tokens; message only
-        print(f"Sync failed: {type(e).__name__}: {e}")
+        print(f"Command failed: {short_error(e)}")
         return 1
 
 

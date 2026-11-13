@@ -209,7 +209,7 @@ async def test_floor_computed_with_real_commission_and_manual_components(session
     set_floor_rule(session, "global", margin_pct=10, ad_share_pct=2)
     r = await engine().evaluate(session, v, NOW)
     assert r.status == OK and r.floor_toman == math.ceil(600_000 / (1 - 0.08 - 0.02 - 0.10))
-    assert r.reason == "computed" and r.fee_reason == "fee_category_row" and r.commission_pct == 8.0
+    assert r.reason == "computed" and r.fee_reason == "fee_assumed_single_brand" and r.commission_pct == 8.0
     assert r.included_components == ["ad_share"] and set(r.unset_components) == set(COMPONENTS) - {"ad_share"}
 
 

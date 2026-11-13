@@ -63,6 +63,9 @@ class DigikalaClient:
     async def _request(self, method: str, path: str, params: dict | None = None) -> dict[str, Any]:
         if method.upper() != "GET":
             raise ReadOnlyViolation(f"Blocked {method}: only GET is allowed.")
+        if not path.startswith("/") or path.startswith("//") or "://" in path:
+            # an absolute URL here would send the Bearer token to another host
+            raise ValueError("API path must start with a single '/' (no host)")
 
         async def send() -> httpx.Response:
             return await self._http.request("GET", path, params=params)

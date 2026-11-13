@@ -110,10 +110,16 @@ def seed(session, *rows):
     session.flush()
 
 
-def test_lookup_single_row_is_category_row(session):
-    seed(session, ci(101, 5, "A", 0.03))
+def test_lookup_single_category_level_row_is_category_row(session):
+    seed(session, ci(101, None, None, 0.03))                      # no brand_id: this IS the category rate
     f = FeeProvider(None, settings()).lookup(session, "101", None)
     assert f.commission_pct == 3.0 and f.reason == FEE_CATEGORY_ROW
+
+
+def test_lookup_single_brand_row_is_only_assumed(session):
+    seed(session, ci(101, 5, "A", 0.03))                          # one brand's rate, not the category rate
+    f = FeeProvider(None, settings()).lookup(session, "101", None)
+    assert f.commission_pct == 3.0 and f.reason == "fee_assumed_single_brand"
 
 
 def test_lookup_several_brands_uses_highest_and_records_reason(session):

@@ -190,7 +190,7 @@ def test_cli_scope_error_is_explained_without_secrets(cli_env, capsys, monkeypat
 
 def test_cli_full_flow_set_floor_brand_import_report(cli_env, capsys, monkeypatch, tmp_path):
     with cli_env() as s:
-        seed_fees(s, ci(101, 5, "Bosch", 0.03), ci(101, 6, "Mann", 0.08))
+        seed_fees(s, ci(101, 5, "Bosch", 0.03), ci(101, 6, "Mann", 0.08), at=datetime.now(timezone.utc))
         mk(s, "1", 10_000, "p1", bb_rial=7_000, win=False)
         sell(s, "p1", 12)
         s.commit()
@@ -243,9 +243,12 @@ def test_check_config_notes(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("POSTGRES_PASSWORD", "pw")
     assert cli.main(["check-config"]) == 0
     assert "DIGIKALA_PRICE_UNIT is not set" not in capsys.readouterr().out      # default is rial now
-    monkeypatch.setenv("DIGIKALA_PRICE_UNIT", "bogus")
+    monkeypatch.setenv("DIGIKALA_PRICE_UNIT", "unknown")
     assert cli.main(["check-config"]) == 0
     assert "DIGIKALA_PRICE_UNIT is not set" in capsys.readouterr().out
+    monkeypatch.setenv("DIGIKALA_PRICE_UNIT", "bogus")                     # not a valid unit: refused outright
+    assert cli.main(["check-config"]) == 1
+    assert "DIGIKALA_PRICE_UNIT" in capsys.readouterr().out
 
 
 def test_config_defaults_and_env(monkeypatch, tmp_path):
