@@ -26,7 +26,9 @@ FEE_BRAND_ROW = "fee_brand_row"
 FEE_ASSUMED_MAX_BRAND = "fee_assumed_max_brand"
 FEE_ASSUMED_SINGLE_BRAND = "fee_assumed_single_brand"  # one brand-specific row: NOT the category rate
 MAX_PARTIAL_CATEGORIES = 50_000  # safety limit only; beyond it EVERY category is marked incomplete
-ALL_CATEGORIES = "*"  # marker: no floor for any category
+ALL_CATEGORIES = "*"  # marker: no floor for any category (fail-closed)
+ORPHAN_MESSAGE_FA = "یک ردیف کمیسیون بدون دسته پیدا شد؛ تا اصلاح نشود هیچ کفی نمایش داده نمی‌شود"
+LIMIT_MESSAGE_FA = "ردیف‌های نامعتبر کمیسیون بیش از حد مجاز است؛ تا اصلاح نشود هیچ کفی نمایش داده نمی‌شود"
 RETRY_AFTER_FAILURE = timedelta(hours=1)
 
 
@@ -50,6 +52,7 @@ class FeeSyncResult:
     rejected: list[str] | None = None
     pages: int = 0
     partial_categories: int = 0  # categories with rejected rows: no floor is computed for them
+    orphan_rows: int = 0  # rows with no usable category_id: NO floor is shown for ANY category
 
 
 class FeeSyncRefused(RuntimeError):
@@ -67,10 +70,17 @@ def _frac(v: Any) -> float | None:
     return f if 0 <= f < 1 else None
 
 
+def usable_category_id(v: Any) -> bool:
+    """A category_id we can match variants against: a non-empty string or a number (not bool/list/dict)."""
+    if v is None or isinstance(v, (bool, dict, list, tuple, set)):
+        return False
+    return bool(str(v).strip())
+
+
 def parse_commission_row(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     """-> (row dict or None, reason if rejected). Swagger fields: main_category_id, category_id,
     brand_id, brand_title, commission, extra_commission, return_free_commission, currentLeadTime."""
-    if raw.get("category_id") in (None, ""):
+    if not usable_category_id(raw.get("category_id")):
         return None, "category_id missing"
     commission = _frac(raw.get("commission"))
     if commission is None:
@@ -105,6 +115,7 @@ async def sync_commissions(client, session: Session, s: Settings, now: datetime,
     rows: list[dict[str, Any]] = []
     rejected: list[str] = []
     partial: set[str] = set()
+    orphans = 0
     page = 0
     while True:
         page += 1
@@ -115,8 +126,10 @@ async def sync_commissions(client, session: Session, s: Settings, now: datetime,
             row, why = parse_commission_row(raw)
             if row is None:
                 rejected.append(f"page {page} item {i + 1}: {why}")
-                if raw.get("category_id") not in (None, ""):
-                    partial.add(str(raw["category_id"]))
+                if usable_category_id(raw.get("category_id")):
+                    partial.add(str(raw["category_id"]).strip())
+                else:
+                    orphans += 1  # we cannot tell which category it belongs to: nothing can be trusted
             else:
                 rows.append(row)
         if (total is not None and page >= total) or (total is None and len(items) < s.page_size) or not items:
@@ -132,16 +145,20 @@ async def sync_commissions(client, session: Session, s: Settings, now: datetime,
     if rejected:
         log.warning("commission sync: %d rows rejected, %d categories incomplete (no floor for them)",
                     len(rejected), len(partial))
+    if orphans:
+        log.warning("commission sync: %d rows have no usable category_id: NO floors are shown until fixed", orphans)
     session.execute(delete(Commission))
     session.add_all(Commission(fetched_at=now, **r) for r in rows)
-    data = {"rows": len(rows), "rejected": len(rejected), "pages": page,
-            "partial_categories": sorted(partial) if len(partial) <= MAX_PARTIAL_CATEGORIES else [ALL_CATEGORIES]}
+    # Same fail-closed path for both cases: too many invalid categories, or ANY orphan row.
+    fail_closed = orphans > 0 or len(partial) > MAX_PARTIAL_CATEGORIES
+    data = {"rows": len(rows), "rejected": len(rejected), "pages": page, "orphan_rows": orphans,
+            "partial_categories": [ALL_CATEGORIES] if fail_closed else sorted(partial)}
     if marker is None:
         session.add(FeeCache(key=MARKER_KEY, data=data, fetched_at=now))
     else:
         marker.data, marker.fetched_at = data, now
     session.commit()
-    return FeeSyncResult(len(rows), rejected, page, len(partial))
+    return FeeSyncResult(len(rows), rejected, page, len(partial), orphans)
 
 
 def effective_fraction(row: Commission, s: Settings) -> float:
@@ -183,8 +200,32 @@ class FeeProvider:
         data = m.data if m is not None and isinstance(m.data, dict) else {}
         return {str(c) for c in data.get("partial_categories", [])}
 
+    def _marker_data(self, session: Session) -> dict:
+        m = session.get(FeeCache, MARKER_KEY)
+        return m.data if m is not None and isinstance(m.data, dict) else {}
+
+    def all_incomplete(self, session: Session) -> bool:
+        """True if the commission data cannot be trusted for ANY category (orphan row / safety limit)."""
+        partial = self._partial_cache if self._partial_cache is not None else self.partial_categories(session)
+        return ALL_CATEGORIES in partial
+
+    def orphan_rows(self, session: Session) -> int:
+        n = self._marker_data(session).get("orphan_rows", 0)
+        return n if isinstance(n, int) and not isinstance(n, bool) else 0
+
+    def incomplete_message_fa(self, session: Session) -> str | None:
+        """Persian explanation when everything is fail-closed (None if the data is usable)."""
+        if not self.all_incomplete(session):
+            return None
+        return ORPHAN_MESSAGE_FA if self.orphan_rows(session) > 0 else LIMIT_MESSAGE_FA
+
     def miss_reason(self, session: Session, category_id: str | None, now: datetime) -> str:
         """Why get() returned None (shown to the user)."""
+        if self.all_incomplete(session):
+            if self.orphan_rows(session) > 0:
+                return ("a commission row has no category: commission data is incomplete for ALL categories, "
+                        "no floor is shown until it is fixed (then run sync-fees)")
+            return "too many invalid commission rows: no floor is shown until they are fixed (then run sync-fees)"
         if not category_id:
             return "variant has no category_id"
         if self.is_stale(session, now):

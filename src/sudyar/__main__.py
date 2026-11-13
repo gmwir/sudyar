@@ -37,6 +37,26 @@ def env_file_warning(path: str = ".env", os_name: str | None = None) -> str | No
     return None
 
 
+def commission_data_notice(s) -> str | None:
+    """Persian warning if the stored commission data is fail-closed (orphan row / too many invalid rows).
+
+    Reads our own database only; if it is not reachable or not migrated yet, there is nothing to report.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from .fees import FeeProvider
+
+    url = s.database_url
+    args = {"connect_timeout": 3} if url.startswith("postgresql") else {}
+    try:
+        engine = create_engine(url, connect_args=args)
+        with Session(engine) as session:
+            return FeeProvider(None, s).incomplete_message_fa(session)
+    except Exception:
+        return None
+
+
 def check_config() -> int:
     s = load_settings()
     problems = s.problems() + s.notify_problems()
@@ -54,6 +74,9 @@ def check_config() -> int:
     print("Token scopes needed (create the Self Token with READ-ONLY access to exactly these; no write scope is needed):")
     for scope, what in READ_ONLY_SCOPES:
         print(f"  - {scope}: {what}")
+    notice = commission_data_notice(s)
+    if notice:
+        print(f"WARNING: {notice}")
     print("Notifications: " + ("ENABLED" if s.notify_enabled else "DRY-RUN (messages are only printed, never sent)"))
     return 0
 
@@ -246,6 +269,9 @@ def sync_fees_cmd(args: list[str]) -> int:
         print(f"sync-fees failed: {_api_hint(e)}")
         return 1
     print(f"Commissions saved: {r.rows} rows ({r.pages} pages), rejected: {len(r.rejected or [])}")
+    if r.orphan_rows:
+        from .fees import ORPHAN_MESSAGE_FA
+        print(f"WARNING: {ORPHAN_MESSAGE_FA}")
     if r.partial_categories:
         print(f"WARNING: {r.partial_categories} categories had invalid rows; no floor is computed for them until fixed.")
     for line in (r.rejected or [])[:20]:

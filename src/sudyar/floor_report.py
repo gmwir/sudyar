@@ -33,6 +33,7 @@ class FloorReport:
     fees_assumed_max_brand: int = 0
     fees_assumed_single_brand: int = 0
     errors: int = 0  # variants skipped because evaluating them raised
+    incomplete_message_fa: str | None = None  # set when commission data is fail-closed for ALL categories
     price_unit: str = ""
     include_extra: bool = False
     include_return_free: bool = False
@@ -66,8 +67,9 @@ async def build_report(session: Session, engine: FloorEngine, now: datetime, top
                        range_: str = SALES_RANGE_DEFAULT) -> FloorReport:
     s = engine.s
     engine.fees.preload(session)
+    incomplete_fa = engine.fees.incomplete_message_fa(session)
     sales = load_sales(session, range_)
-    rep = FloorReport(range=range_, sales_rows=len(sales), sales_synced=sales_synced_at(session, range_),
+    rep = FloorReport(range=range_, incomplete_message_fa=incomplete_fa, sales_rows=len(sales), sales_synced=sales_synced_at(session, range_),
                       fees_synced=engine.fees.synced_at(session), price_unit=s.price_unit,
                       include_extra=s.floor_include_extra_commission,
                       include_return_free=s.floor_include_return_free_commission,
@@ -92,6 +94,10 @@ COMP_FA = {"fulfillment": "fulfillment/processing", "tax": "tax", "ad_share": "a
 
 def format_report(rep: FloorReport) -> str:
     L: list[str] = []
+    if rep.incomplete_message_fa:
+        L.append(f"!!! {rep.incomplete_message_fa}")
+        L.append("!!! Commission data is incomplete for ALL categories: every floor is needs_fees (manual floors too).")
+        L.append("")
     L.append(f"Active variants checked: {rep.checked}   (prices: {rep.price_unit}; all floor math in Toman = Rial/10)")
     L.append(f"Commissions last synced: {rep.fees_synced or 'NEVER (run sync-fees)'}")
     L.append(f"Sales ({rep.range}) last synced: {rep.sales_synced or 'NEVER (run sales-sync)'}; products with data: {rep.sales_rows}")

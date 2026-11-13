@@ -220,6 +220,11 @@ class FloorEngine:
         setting = resolve_setting(session, variant, self.s)
         if setting is None:
             return FloorResult(NO_RULE, reason="no floor rule set (use set-floor)")
+        if self.fees.all_incomplete(session):
+            # Fail closed: commission data is untrustworthy for every category (orphan row / safety limit).
+            # A manual floor must not bypass this, so this comes before any floor is computed.
+            category = _field(variant.raw_json, self.s.floor_category_field)
+            return FloorResult(NEEDS_FEES, reason=self.fees.miss_reason(session, category, now), scope=setting.scope)
         cost_row = session.get(VariantCost, variant.id)
         cost = _valid_cost(cost_row.buy_cost if cost_row is not None else None)   # 0 / negative / NaN / inf = missing
         has_margin_rule = setting.margin_pct is not None or setting.min_profit_toman is not None
