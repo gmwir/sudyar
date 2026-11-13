@@ -186,10 +186,20 @@ class FeeProvider:
         at = self.synced_at(session)
         return at is not None and (now - at).total_seconds() < self.s.fees_cache_seconds
 
+    def has_rows(self, session: Session) -> bool:
+        return session.scalar(select(Commission.id).limit(1)) is not None
+
     def is_stale(self, session: Session, now: datetime) -> bool:
-        """Last good sync is older than FEES_MAX_STALE_DAYS (refreshes keep failing): do not trust the rows."""
+        """Commission rows must not be trusted: the last good sync is older than FEES_MAX_STALE_DAYS
+        (refreshes keep failing), OR rows exist but there is no sync record at all (unknown age = never fresh)."""
         at = self.synced_at(session)
-        return at is not None and (now - at).total_seconds() > self.s.fees_max_stale_days * 86_400
+        if at is None:
+            return self.has_rows(session)
+        return (now - at).total_seconds() > self.s.fees_max_stale_days * 86_400
+
+    def data_usable(self, session: Session, now: datetime) -> bool:
+        """Commission data exists AND is fresh enough to rely on (needs a sync record; never-synced is not usable)."""
+        return self.synced_at(session) is not None and not self.is_stale(session, now)
 
     @staticmethod
     def _is_partial(category_id: str, partial: set[str]) -> bool:
@@ -226,10 +236,12 @@ class FeeProvider:
                 return ("a commission row has no category: commission data is incomplete for ALL categories, "
                         "no floor is shown until it is fixed (then run sync-fees)")
             return "too many invalid commission rows: no floor is shown until they are fixed (then run sync-fees)"
-        if not category_id:
-            return "variant has no category_id"
+        if self.synced_at(session) is None:
+            return "commission data was never synced, or has no sync record - run sync-fees"
         if self.is_stale(session, now):
             return f"commissions older than {self.s.fees_max_stale_days:g} days (refresh failing?) - run sync-fees"
+        if not category_id:
+            return "variant has no category_id"
         if self._is_partial(str(category_id), self.partial_categories(session)):
             return "some commission rows of this category were invalid, so the highest rate is unknown - fix and run sync-fees"
         return "no commission row for this variant's category (run sync-fees)"

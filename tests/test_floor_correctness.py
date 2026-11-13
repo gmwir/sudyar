@@ -63,6 +63,7 @@ def engine(**kw):
 # ============ 1. a computed manual floor of 0 is never an "ok" floor ============
 @pytest.mark.parametrize("price_rial", [0, 1, 4])          # 1 rial = 0.1 toman; 90% of it rounds up to 1, of 0 stays 0
 async def test_manual_pct_on_zero_price_is_no_floor_not_ok_zero(session, price_rial):
+    seed(session, ci(101, None, None, 0.10))                     # fresh commission data (Part 3f)
     v = mkvar(session, price_rial=price_rial)
     set_floor_rule(session, "global", floor_manual_pct=90)
     r = await engine().evaluate(session, v, NOW)
@@ -82,6 +83,7 @@ async def test_zero_price_with_cost_known_and_manual_only_is_no_floor(session):
 
 
 async def test_zero_price_manual_pct_plus_valid_manual_toman_uses_the_toman(session):
+    seed(session, ci(101, None, None, 0.10))                     # fresh commission data (Part 3f)
     v = mkvar(session, price_rial=0)
     set_floor_rule(session, "global", floor_manual_pct=90, floor_manual_toman=700)
     r = await engine().evaluate(session, v, NOW)
@@ -167,6 +169,7 @@ async def test_margin_rule_floor_also_never_below_breakeven(session):
 
 
 async def test_no_cost_manual_floor_is_unchanged(session):
+    seed(session, ci(101, None, None, 0.10))                     # fresh commission data (Part 3f)
     v = mkvar(session)
     set_floor_rule(session, "global", floor_manual_toman=800_000)
     r = await engine().evaluate(session, v, NOW)
@@ -223,6 +226,7 @@ async def test_cost_zero_row_in_old_database_is_treated_as_missing(session):
 
 async def test_negative_cost_row_with_manual_floor_behaves_like_no_cost(session):
     v = mkvar(session)
+    seed(session, ci(101, None, None, 0.10))                              # fresh commission data (Part 3f)
     session.execute(text("PRAGMA ignore_check_constraints = ON"))
     session.add(VariantCost(variant_id=v.id, buy_cost=-10, source="manual", updated_at=NOW))
     session.flush()

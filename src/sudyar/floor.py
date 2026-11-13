@@ -247,6 +247,14 @@ class FloorEngine:
 
         if cost is None:  # never guess a cost
             if manual_floor is not None:
+                # A manual floor is only shown while the commission data is fresh: stale or never-synced
+                # data fails closed (needs_fees), exactly like the "*" marker path.
+                if allow_fetch:
+                    await self.fees.ensure_fresh(session, now)
+                if not self.fees.data_usable(session, now):
+                    category = _field(variant.raw_json, self.s.floor_category_field)
+                    return FloorResult(NEEDS_FEES, reason=self.fees.miss_reason(session, category, now),
+                                       scope=setting.scope)
                 return FloorResult(OK, manual_floor, None, "manual_floor_no_cost", setting.scope)
             if unusable_manual_only:
                 return FloorResult(NO_FLOOR, reason="manual floor is not usable (zero/invalid, e.g. current price 0)",

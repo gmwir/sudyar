@@ -173,6 +173,7 @@ async def test_needs_cost_without_manual_floor(session):
 
 async def test_manual_floor_used_when_cost_missing(session):
     v = mkvar(session, price_rial=10_000_000)                     # 1,000,000 toman
+    seed_fee(session, ci(101, 5, "A", 0.03))                      # fresh commission data is required (Part 3f)
     set_floor_rule(session, "global", margin_pct=10, floor_manual_toman=800_000, floor_manual_pct=90)
     r = await engine().evaluate(session, v, NOW)
     assert r.status == OK and r.floor_toman == 900_000 and r.reason == "manual_floor_no_cost"
