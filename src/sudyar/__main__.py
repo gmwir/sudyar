@@ -12,10 +12,9 @@ USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status 
          "[--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
 
 
-READ_ONLY_SCOPES = (
-    ("variants", "GET /open-api/v1/variants"),
-    ("pricing/buybox", "GET /open-api/v1/pricing/buybox/price-suggestion/winning-price (and nth-rank-winning-price)"),
-    ("commissions", "GET /open-api/v1/commissions/"),
+READ_ONLY_SCOPES = (  # official Service Hub scopes, all read-only
+    ("variant", "GET /open-api/v1/variants and GET /open-api/v1/pricing/buybox/price-suggestion/winning-price (+ nth-rank-winning-price)"),
+    ("commission", "GET /open-api/v1/commissions/"),
     ("insight", "GET /open-api/v1/insight/sales-reports"),
 )
 
@@ -220,7 +219,7 @@ def _api_hint(e: Exception) -> str:
         return f"{e}"
     msg = short_error(e)
     if error_code(e) in ("HTTP-401", "HTTP-403"):
-        msg += "  (check the Self Token scopes: sync-fees needs 'commissions', sales-sync needs 'insight')"
+        msg += "  (check the Self Token scopes: sync-fees needs 'commission', sales-sync needs 'insight', variants and winning-price need 'variant')"
     return msg
 
 

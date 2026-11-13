@@ -439,6 +439,7 @@ def test_command_failure_prints_no_message(monkeypatch, tmp_path, capsys):
 def test_api_hint_keeps_scope_help_without_raw_message():
     msg = cli._api_hint(ApiError("GET /open-api/v1/commissions/ failed with status 403"))
     assert "code HTTP-403" in msg and "scopes" in msg and "/open-api" not in msg
+    assert "'commission'" in msg and "'variant'" in msg and "'commissions'" not in msg
 
 
 def test_radar_cycle_failure_line_has_no_message(monkeypatch, capsys):
@@ -473,15 +474,17 @@ def test_check_config_lists_scopes(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("POSTGRES_PASSWORD", "pw")
     assert cli.main(["check-config"]) == 0
     out = capsys.readouterr().out
-    for scope in ("variants", "pricing/buybox", "commissions", "insight"):
-        assert f"- {scope}:" in out
-    assert "READ-ONLY" in out and "no write scope is needed" in out
+    scopes = [line.strip().split(":")[0][2:] for line in out.splitlines() if line.startswith("  - ")]
+    assert scopes == ["variant", "commission", "insight"]                     # exactly the 3 official scopes
+    assert "pricing/buybox" not in out.split("Token scopes needed")[1].split("Notifications")[0].split("GET")[0]
+    assert "winning-price" in out and "READ-ONLY" in out and "no write scope is needed" in out
 
 
 def test_readme_lists_scopes():
     text = (ROOT / "README_FA.md").read_text()
-    for scope in ("variants", "pricing/buybox", "commissions", "insight"):
-        assert scope in text
+    assert "| `variant` |" in text and "| `commission` |" in text and "| `insight` |" in text
+    assert "| `pricing/buybox` |" not in text and "| `variants` |" not in text and "| `commissions` |" not in text
+    assert "این سه دسترسی" in text and "چهار بخش" not in text
     assert "Self Token" in text and "فقط خواندن" in text
 
 

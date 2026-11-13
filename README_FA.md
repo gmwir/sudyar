@@ -284,16 +284,15 @@ docker compose exec worker python -m sudyar set-floor --scope category --key 101
 # بخش ۳ج: اصلاحات امنیتی و دسترسی‌های توکن
 
 ## توکن (Self Token) چه دسترسی‌هایی لازم دارد؟
-توکن را در پنل فروشنده **فقط با دسترسی «خواندن» (read-only)** و دقیقاً برای این چهار بخش بسازید. هیچ دسترسی «نوشتن» لازم نیست و برنامه هرگز چیزی در دیجی‌کالا تغییر نمی‌دهد:
+توکن را در پنل فروشنده **فقط با دسترسی «خواندن» (read-only)** و دقیقاً برای این سه دسترسی بسازید. هیچ دسترسی «نوشتن» لازم نیست و برنامه هرگز چیزی در دیجی‌کالا تغییر نمی‌دهد:
 
 | دسترسی (scope) | چه چیزی را می‌خواند |
 |---|---|
-| `variants` | `GET /open-api/v1/variants` (فهرست کالاهای شما) |
-| `pricing/buybox` | `GET /open-api/v1/pricing/buybox/price-suggestion/winning-price` (قیمت پیشنهادی برای باکس خرید) |
-| `commissions` | `GET /open-api/v1/commissions/` (کمیسیون‌ها) |
+| `variant` | `GET /open-api/v1/variants` (فهرست کالاهای شما) و `GET /open-api/v1/pricing/buybox/price-suggestion/winning-price` (قیمت پیشنهادی برای باکس خرید؛ دسترسی جدا به نام «pricing/buybox» وجود ندارد) |
+| `commission` | `GET /open-api/v1/commissions/` (کمیسیون‌ها) |
 | `insight` | `GET /open-api/v1/insight/sales-reports` (آمار فروش) |
 
-نام دقیق هر دسترسی را باید با فهرست پنل فروشنده مقایسه کنید. دستور `check-config` همین فهرست را چاپ می‌کند.
+این سه، دسترسی‌های رسمی Service Hub هستند و هر سه فقط‌خواندنی‌اند. دستور `check-config` همین فهرست را چاپ می‌کند.
 
 ## چه چیزهایی در این نسخه سخت‌گیرانه‌تر شد
 - **کف دستی** همیشه بزرگ‌تر از صفر است و اگر قیمت خرید را دارید، هرگز پایین‌تر از قیمت خرید نمی‌رود.
