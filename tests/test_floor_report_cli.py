@@ -268,10 +268,11 @@ def test_config_defaults_and_env(monkeypatch, tmp_path):
 
 # ---------- read-only guarantee ----------
 def test_no_write_http_methods_anywhere_toward_digikala():
-    """Only notifier.py may POST (Telegram/Bale). Nothing else may even mention a write method call."""
+    """Only notifier.py may POST (Telegram/Bale) and servicehub.py (the two OAuth token endpoints, locked by
+    tests/test_servicehub.py). Nothing else may even mention a write method call."""
     for f in (ROOT / "src" / "sudyar").glob("*.py"):
         text = f.read_text()
-        if f.name in ("notifier.py", "digikala_client.py"):
+        if f.name in ("notifier.py", "digikala_client.py", "servicehub.py"):
             continue
         assert not re.search(r"\.(post|put|patch|delete)\(", text), f.name
 

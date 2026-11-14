@@ -81,11 +81,14 @@ def test_web_package_cannot_reach_digikala_or_write_anything_outside_our_db():
 
 ALLOWED_WRITE_ROUTES = {("/login", ("POST",)), ("/logout", ("POST",)), ("/settings/alerts", ("POST",)),
                         ("/costs/upload", ("POST",)), ("/costs/apply", ("POST",)),
-                        ("/costs/{variant_id}", ("POST",)), ("/costs/{variant_id}/clear", ("POST",))}
+                        ("/costs/{variant_id}", ("POST",)), ("/costs/{variant_id}/clear", ("POST",)),
+                        ("/connect/disconnect", ("POST",))}
 
 
 def test_every_route_handler_that_writes_is_known():
-    """Writers: login/logout (session only), alerts form (app_settings), buy-cost page (variant_costs + cost_audit)."""
+    """Writers: login/logout (session only), alerts form (app_settings), buy-cost page (variant_costs + cost_audit),
+    Service Hub disconnect (seller_connections). GET /oauth/callback also writes seller_connections, but only after a
+    single-use server-side state matches (tests/test_servicehub.py)."""
     app = make_app()
     writes = {(r.path, tuple(sorted(r.methods))) for r in app.routes if hasattr(r, "methods") and r.methods & {"POST", "PUT", "PATCH", "DELETE"}}
     assert writes == ALLOWED_WRITE_ROUTES

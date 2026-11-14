@@ -37,18 +37,21 @@ class DigikalaClient:
         limiter: RateLimiter,
         call_logger: CallLogger | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        token_provider: Callable[[], str] | None = None,
     ):
         self.settings = settings
         self.limiter = limiter
         self.call_logger = call_logger
+        # Service Hub OAuth: a (blocking) callable that returns a valid access token, refreshing when needed.
+        # Without it the Self Token is used, as before. Either way the token lives only in the header; never logged.
+        self._token_provider = token_provider
         token = settings.digikala_self_token.get_secret_value()
-        # Token lives only in this header; it is never logged.
+        base_headers = {"content-type": "application/json"}
+        if token_provider is None:
+            base_headers[settings.auth_header] = f"{settings.auth_prefix}{token}"
         self._http = httpx.AsyncClient(
             base_url=settings.base_url,
-            headers={
-                settings.auth_header: f"{settings.auth_prefix}{token}",
-                "content-type": "application/json",
-            },
+            headers=base_headers,
             timeout=30,
             transport=transport,
             event_hooks={"request": [_async_guard]},
@@ -74,7 +77,12 @@ class DigikalaClient:
             raise ReadOnlyViolation(f"Blocked GET {path}: not one of the configured read endpoints.")
 
         async def send() -> httpx.Response:
-            return await self._http.request("GET", path, params=params)
+            headers = None
+            if self._token_provider is not None:
+                import asyncio
+                tok = await asyncio.to_thread(self._token_provider)
+                headers = {self.settings.auth_header: f"{self.settings.auth_prefix}{tok}"}
+            return await self._http.request("GET", path, params=params, headers=headers)
 
         def on_call(status: int | None, seconds: float) -> None:
             log.info("GET %s -> %s (%.2fs)", path, status, seconds)

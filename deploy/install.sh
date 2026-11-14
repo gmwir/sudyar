@@ -69,6 +69,7 @@ PY
 
 put POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 put WEB_SECRET_KEY "$(openssl rand -hex 32)"
+put SUDYAR_TOKEN_KEY "$(openssl rand -base64 32 | tr '+/' '-_')"   # Fernet key for stored Service Hub tokens
 
 if [ -z "$(get SUDYAR_DOMAIN)" ]; then
   read -r -p "Domain (example: app.sudyarapp.ir): " dom

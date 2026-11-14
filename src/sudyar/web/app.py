@@ -27,7 +27,8 @@ from ..cost_import import MAX_UPLOAD_BYTES, MAX_UPLOAD_ROWS, CostImportError, ap
 from ..costs import set_cost
 from ..models import Variant, utcnow
 from ..ui_settings import UiSettingsError, save_ui_settings
-from . import cost_page, data, fmt
+from .. import servicehub as sh
+from . import connect, cost_page, data, fmt
 from .auth import LoginThrottle, PasswordGate, WebConfigError, check_bind, csrf_valid, new_csrf_token
 
 log = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
                web_password: str | None = None, bind_host: str = "127.0.0.1", allow_container_bind: bool = False,
                now_fn: Callable[[], datetime] = utcnow, cache_seconds: float = 30.0,
                secret_key: str | None = None, https_only_cookie: bool = False,
-               trusted_proxies: tuple[str, ...] = ()) -> FastAPI:
+               trusted_proxies: tuple[str, ...] = (), auth_client_factory: Callable | None = None) -> FastAPI:
     check_bind(bind_host, web_password, allow_container_bind)  # raises WebConfigError: refuse to start
     if settings is None:
         from ..config import load_settings
@@ -150,6 +151,9 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
     throttle = LoginThrottle()
     cache = RowCache(cache_seconds)
     previews = cost_page.PreviewStore()
+    oauth_states = connect.OAuthStates()
+    if auth_client_factory is None:
+        auth_client_factory = lambda: sh.AuthClient(settings.base_url)  # noqa: E731 (the two OAuth token POSTs only)
     app = FastAPI(title="Sudyar", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.session_factory, app.state.gate = settings, session_factory, gate
     app.state.cache, app.state.now_fn = cache, now_fn
@@ -466,5 +470,63 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
             return RedirectResponse("/settings", status_code=303)
         ctx = settings_ctx(session, ok=ok, message=message)
         return render(request, "_alerts_card.html", status_code=200 if ok else 422, **ctx)
+
+    # ------------------------------------------------------------------ Service Hub OAuth (Part 5b)
+    def connect_page(request: Request, session: Session, notice=None, status_code: int = 200):
+        return render(request, "connect.html", "settings", status_code=status_code, title="اتصال به دیجی‌کالا",
+                      st=sh.connection_status(session), r=connect.readiness(settings), scope_fa=connect.SCOPE_FA,
+                      self_token=bool(settings.digikala_self_token.get_secret_value().strip()), notice=notice)
+
+    @app.get("/connect", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def connect_view(request: Request, ok: int | None = None, session: Session = Depends(get_session)):
+        return connect_page(request, session, (True, "اتصال انجام شد.") if ok else None)
+
+    @app.get("/connect/start", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def connect_start(request: Request, session: Session = Depends(get_session)):
+        r = connect.readiness(settings)
+        if not r.ready:
+            return connect_page(request, session, (False, "تنظیمات اتصال کامل نیست."), status_code=409)
+        try:
+            url = sh.build_consent_url(settings.servicehub_client_code, r.redirect_url, settings.servicehub_scopes,
+                                       oauth_states.issue())
+        except sh.ServiceHubError as e:
+            return connect_page(request, session, (False, str(e)), status_code=409)
+        return RedirectResponse(url, status_code=303)
+
+    def oauth_done(request: Request, ok: bool, message: str, status_code: int):
+        heading = "اتصال انجام شد" if ok else "اتصال انجام نشد"
+        return templates.TemplateResponse(request, "oauth_done.html", dict(heading=heading, message=message,
+                                          asset_v=ASSET_VERSION), status_code=status_code)
+
+    @app.get("/oauth/callback", include_in_schema=False)
+    def oauth_callback(request: Request, session: Session = Depends(get_session), state: str = "",
+                       authorization_code: str = "", error: str = ""):
+        # No login cookie arrives here (SameSite=Strict on a redirect from Digikala): the single-use,
+        # server-side state that only a logged-in owner could create is what authorizes this request.
+        if not oauth_states.consume(state):
+            return oauth_done(request, False, "این لینک معتبر نیست یا منقضی شده. از سودیار دوباره «اتصال» را بزنید.", 400)
+        if error:
+            msg = "فروشنده اجازه نداد." if error == "access_denied" else "دیجی‌کالا اتصال را رد کرد."
+            return oauth_done(request, False, msg, 400)
+        auth = auth_client_factory()
+        try:
+            code = sh.decrypt_authorization_code(authorization_code, sh.read_private_key(settings.servicehub_private_key_file))
+            tokens = auth.exchange_code(code, now_fn())
+            del code
+            sh.save_tokens(session, sh.make_fernet(settings.token_key.get_secret_value()), tokens,
+                           settings.servicehub_scopes, now_fn(), new=True)
+        except sh.ServiceHubError as e:
+            session.rollback()
+            return oauth_done(request, False, f"خطا: {e}", 502)
+        finally:
+            auth.close()
+        return oauth_done(request, True, "سودیار حالا با تأیید شما، فقط داده‌ها را می‌خواند.", 200)
+
+    @app.post("/connect/disconnect", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def connect_disconnect(request: Request, session: Session = Depends(get_session),
+                           csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
+        verify_csrf(request, csrf_token_f, x_csrf_token)
+        sh.disconnect(session)
+        return RedirectResponse("/connect", status_code=303)
 
     return app

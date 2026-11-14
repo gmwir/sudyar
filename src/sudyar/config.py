@@ -94,6 +94,12 @@ def check_bale_base(url: str, allowed_hosts: str) -> str | None:
 
 class Settings(BaseModel):
     digikala_self_token: SecretStr = SecretStr("")
+    # Service Hub OAuth (Part 5b). Empty client code = use the Self Token as before.
+    servicehub_client_code: str = ""
+    servicehub_redirect_url: str = ""
+    servicehub_private_key_file: str = "/data/secrets/servicehub_private_key.pem"
+    servicehub_scopes: str = "variant.read order.read commission insight"
+    token_key: SecretStr = SecretStr("")
     postgres_password: SecretStr = SecretStr("")
     database_url_override: str = ""
     postgres_user: str = "sudyar"
@@ -265,7 +271,10 @@ class Settings(BaseModel):
     def problems(self) -> list[str]:
         """Human-readable list of what is missing (empty = OK)."""
         out = []
-        if not self.digikala_self_token.get_secret_value().strip():
+        if self.servicehub_client_code.strip():
+            if not self.token_key.get_secret_value().strip():
+                out.append("SUDYAR_TOKEN_KEY is missing (needed to store Service Hub tokens). Run: python -m sudyar oauth-keygen")
+        elif not self.digikala_self_token.get_secret_value().strip():
             out.append("DIGIKALA_SELF_TOKEN is missing. Put your Self Token in the .env file.")
         if not self.database_url_override and not self.postgres_password.get_secret_value():
             out.append("POSTGRES_PASSWORD is missing. Choose a password and put it in the .env file.")
@@ -294,6 +303,18 @@ class Settings(BaseModel):
                 out.append(f"Unknown notification channel '{ch}' (use telegram or bale).")
         return out
 
+    @property
+    def oauth_mode(self) -> bool:
+        """Service Hub OAuth is used when a client code is set and no Self Token is given."""
+        return bool(self.servicehub_client_code.strip()) and not self.digikala_self_token.get_secret_value().strip()
+
+    @property
+    def redirect_url(self) -> str:
+        if self.servicehub_redirect_url:
+            return self.servicehub_redirect_url
+        dom = os.environ.get("SUDYAR_DOMAIN", "").strip()
+        return f"https://{dom}/oauth/callback" if dom else ""
+
     def require_ok(self) -> None:
         problems = self.problems() + self.notify_problems()
         if problems:
@@ -318,6 +339,11 @@ def load_settings() -> Settings:
                 raise ConfigError(f"{env} has an invalid value.") from e
 
     put("digikala_self_token", "DIGIKALA_SELF_TOKEN", SecretStr)
+    put("servicehub_client_code", "SERVICEHUB_CLIENT_CODE")
+    put("servicehub_redirect_url", "SERVICEHUB_REDIRECT_URL")
+    put("servicehub_private_key_file", "SERVICEHUB_PRIVATE_KEY_FILE")
+    put("servicehub_scopes", "SERVICEHUB_SCOPES")
+    put("token_key", "SUDYAR_TOKEN_KEY", SecretStr)
     put("postgres_password", "POSTGRES_PASSWORD", SecretStr)
     put("database_url_override", "DATABASE_URL")
     put("postgres_user", "POSTGRES_USER")

@@ -239,3 +239,19 @@ class DailySales(Base):
     unit_sale_price: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     quantity: Mapped[int] = mapped_column(Integer)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SellerConnection(Base):
+    """Service Hub OAuth connection (one seller per install for now). Tokens are Fernet-encrypted, never plain."""
+
+    __tablename__ = "seller_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scopes: Mapped[str | None] = mapped_column(String(500))
+    access_token_enc: Mapped[str] = mapped_column(String(8000))
+    refresh_token_enc: Mapped[str] = mapped_column(String(4000))
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_error: Mapped[str | None] = mapped_column(String(300))

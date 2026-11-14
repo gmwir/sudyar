@@ -9,7 +9,7 @@ from .logging_setup import error_code, setup_logging, short_error
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
          "web [--host H] [--port N] | floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
-         "[--force] | orders-sync [--days N] [--force] | orders-show | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
+         "[--force] | orders-sync [--days N] [--force] | orders-show | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | oauth-keygen | oauth-status | healthcheck]")
 
 
 READ_ONLY_SCOPES = (  # official Service Hub scopes, all read-only
@@ -96,7 +96,38 @@ def _build(s, radar: bool = False):
         backoff_base=s.backoff_base_seconds, backoff_max=s.backoff_max_seconds,
         breaker_threshold=s.breaker_threshold, breaker_pause=s.breaker_pause_seconds,
     ))
-    return factory, DigikalaClient(s, limiter, make_call_logger(factory))
+    provider = _oauth_token_provider(s, factory) if s.oauth_mode else None
+    return factory, DigikalaClient(s, limiter, make_call_logger(factory), token_provider=provider)
+
+
+def _oauth_token_provider(s, factory):
+    """Service Hub OAuth: returns a valid access token from our encrypted store (refreshes it when near expiry)."""
+    import threading
+
+    from .servicehub import AuthClient, access_token, make_fernet
+
+    fernet = make_fernet(s.token_key.get_secret_value())
+    lock = threading.Lock()
+    cache: dict = {}
+
+    def provide() -> str:
+        from datetime import timedelta
+
+        from .models import utcnow
+        with lock:
+            now = utcnow()
+            if cache.get("tok") and cache["until"] > now:
+                return cache["tok"]
+            auth = AuthClient(s.base_url)
+            try:
+                with factory() as session:
+                    tok = access_token(session, fernet, auth, now)
+            finally:
+                auth.close()
+            cache.update(tok=tok, until=now + timedelta(minutes=5))
+            return tok
+
+    return provide
 
 
 def buybox_status() -> int:
@@ -524,9 +555,52 @@ def run_sync() -> int:
     return 0
 
 
+def oauth_keygen() -> int:
+    """Create the RSA-4096 private key for Service Hub (0600, never overwritten) and print the PUBLIC key
+    to paste into the app registration. Also prints a SUDYAR_TOKEN_KEY if none is set."""
+    from .servicehub import ServiceHubError, new_token_key, public_key_pem, read_private_key, write_private_key
+
+    s = load_settings()
+    path = s.servicehub_private_key_file
+    try:
+        pub = write_private_key(path)
+        print(f"Private key created: {path} (keep it secret, back it up; never share it)")
+    except ServiceHubError:
+        pub = public_key_pem(read_private_key(path))
+        print(f"Private key already exists: {path} (not changed)")
+    print("Public key for the Service Hub registration form (public_key):")
+    print(pub)
+    if not s.token_key.get_secret_value():
+        print("Add this line to .env (encrypts stored tokens; keep it secret):")
+        print(f"SUDYAR_TOKEN_KEY={new_token_key()}")
+    return 0
+
+
+def oauth_status() -> int:
+    from .db import make_engine, make_session_factory
+    from .servicehub import connection_status
+
+    s = load_settings()
+    factory = make_session_factory(make_engine(s.database_url))
+    with factory() as session:
+        st = connection_status(session)
+    mode = "Service Hub OAuth" if s.oauth_mode else "Self Token"
+    print(f"Mode: {mode}; client_code: {'set' if s.servicehub_client_code else 'not set'}; redirect: {s.redirect_url or 'not set'}")
+    print(f"Scopes: {s.servicehub_scopes}")
+    if not st.connected:
+        print("No seller connected.")
+        return 0
+    acc = f"{st.access_expires_at:%Y-%m-%d %H:%M} UTC" if st.access_expires_at else "unknown"
+    print(f"Connected since {st.connected_at:%Y-%m-%d %H:%M} UTC; access token until {acc}"
+          + (f"; 1-year access until {st.refresh_expires_at:%Y-%m-%d}" if st.refresh_expires_at else ""))
+    if st.last_error:
+        print(f"Last refresh error: {st.last_error}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     setup_logging()
-    cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
+    cmds = {"oauth-keygen": 1, "oauth-status": 1, "check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
     free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "orders-sync", "orders-show", "set-brand", "list-brands")  # take options
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
@@ -555,6 +629,10 @@ def main(argv: list[str]) -> int:
             return sync_fees_cmd(argv[1:])
         if argv[0] == "healthcheck":
             return healthcheck()
+        if argv[0] == "oauth-keygen":
+            return oauth_keygen()
+        if argv[0] == "oauth-status":
+            return oauth_status()
         if argv[0] == "check-config":
             return check_config()
         if argv[0] == "sync-variants":
