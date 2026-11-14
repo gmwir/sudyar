@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>قیمت خرید</h1><p class="sub">اختیاری · فقط در پایگاه داده‌ی خودتان</p></div>
+
+<div class="notice info">
+  <b>این صفحه برای چیست؟</b>
+  قیمت خرید هر کالا را به <b class="inl">تومان</b> بنویسید تا کف قیمت و سود حساب شود. ثبت قیمت خرید اجباری نیست؛
+  کالایی که قیمت خرید ندارد با کف دستی (عدد یا درصد) مثل قبل کار می‌کند و چیزی حدس زده نمی‌شود.
+  هیچ‌چیز به دیجی‌کالا فرستاده نمی‌شود.
+</div>
+
+{% if notice %}<div class="notice {{ 'success' if notice[0] else 'danger' }}" role="status">{{ notice[1] }}</div>{% endif %}
+
+{% if preview is not none %}
+<section class="card pad field gap12" aria-labelledby="pv-title">
+  <span class="lbl" id="pv-title">پیش‌نمایش فایل (هنوز چیزی ذخیره نشده)</span>
+  <div class="stats">
+    <div class="stat"><b class="c-success">{{ preview.created | length | fa }}</b><span>قیمت تازه</span></div>
+    <div class="stat"><b class="c-warning">{{ preview.updated | length | fa }}</b><span>تغییر قیمت</span></div>
+    <div class="stat"><b>{{ preview.unchanged | length | fa }}</b><span>بدون تغییر</span></div>
+    <div class="stat"><b class="c-danger">{{ preview.rejected | length | fa }}</b><span>ردشده</span></div>
+  </div>
+  {% if preview.to_apply %}
+  <ul class="audit">
+    {% for e in preview.to_apply[:100] %}
+    <li><span>{{ e.title or e.digikala_variant_id }}</span>
+      <span class="sub">ردیف {{ e.rownum | fa }}: {{ e.old | toman if e.old else 'بدون قیمت' }} ← {{ e.new | toman }}</span></li>
+    {% endfor %}
+  </ul>
+  {% if preview.to_apply | length > 100 %}<p class="sub">و {{ (preview.to_apply | length - 100) | fa }} مورد دیگر (همه با تأیید ذخیره می‌شوند).</p>{% endif %}
+  {% endif %}
+  {% if preview.rejected %}
+  <div class="notice warning"><b>ردیف‌های ردشده (ذخیره نمی‌شوند)</b>
+    <ul>{% for n, why in preview.rejected[:50] %}<li>ردیف {{ n | fa }}: {{ why }}</li>{% endfor %}</ul>
+    {% if preview.rejected | length > 50 %}<p class="sub">و {{ (preview.rejected | length - 50) | fa }} ردیف دیگر.</p>{% endif %}
+  </div>
+  {% endif %}
+  {% if token %}
+  <form method="post" action="/costs/apply" class="field gap12">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="token" value="{{ token }}">
+    <button class="btn" type="submit">تأیید و ذخیره‌ی {{ preview.to_apply | length | fa }} قیمت</button>
+    <a class="btn secondary" href="/costs">انصراف</a>
+  </form>
+  {% else %}<p class="sub">چیزی برای ذخیره نیست.</p><a class="btn secondary" href="/costs">بازگشت</a>{% endif %}
+</section>
+{% endif %}
+
+<form class="card pad field gap12" method="post" action="/costs/upload" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label class="lbl" for="file">بارگذاری فایل اکسل یا CSV</label>
+  <input type="file" id="file" name="file" accept=".xlsx,.csv" required>
+  <p class="sub">ستون‌ها: <span dir="ltr">buy_cost</span> و یکی از <span dir="ltr">variant_id</span> یا <span dir="ltr">sku</span>. قیمت به تومان.
+    فقط .xlsx یا .csv، تا {{ max_upload_mb | fa }} مگابایت و {{ max_upload_rows | fa }} ردیف. فرمول و ماکرو اجرا نمی‌شود.
+    اول پیش‌نمایش می‌بینید و فقط با دکمه‌ی تأیید ذخیره می‌شود.</p>
+  <button class="btn secondary" type="submit">پیش‌نمایش</button>
+</form>
+
+<form class="field" method="get" action="/costs" role="search">
+  <label class="lbl" for="q">جست‌وجوی کالا</label>
+  <input type="text" id="q" name="q" value="{{ v.q }}" placeholder="نام یا شناسه‌ی کالا" autocomplete="off">
+</form>
+<p class="sub">{{ v.total | fa }} کالا · {{ v.with_cost | fa }} کالا قیمت خرید دارد</p>
+
+<div class="tablewrap"><table class="costs">
+  <thead><tr><th>کالا</th><th>قیمت خرید (تومان)</th></tr></thead>
+  <tbody>
+  {% for row in v.rows %}{% include "_cost_row.html" %}{% else %}
+  <tr><td colspan="2" class="sub">کالایی پیدا نشد.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% if v.pages > 1 %}
+<p class="sub">صفحه‌ی {{ v.page | fa }} از {{ v.pages | fa }}
+  {% if v.page > 1 %}<a href="/costs?q={{ v.q | urlencode }}&page={{ v.page - 1 }}">قبلی</a>{% endif %}
+  {% if v.page < v.pages %}<a href="/costs?q={{ v.q | urlencode }}&page={{ v.page + 1 }}">بعدی</a>{% endif %}</p>
+{% endif %}
+
+<h2>۲۰ تغییر آخر</h2>
+<div id="audit" class="card" hx-get="/costs/audit" hx-trigger="costs-changed from:body" hx-swap="innerHTML">
+  {% with lines=v.changes %}{% include "_cost_audit.html" %}{% endwith %}
+</div>
+{% endblock %}

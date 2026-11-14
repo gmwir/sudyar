@@ -109,6 +109,20 @@ class VariantCost(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CostAudit(Base):
+    """One line per change of a buy cost (web or file import). Local only; never sent anywhere."""
+
+    __tablename__ = "cost_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(Integer, index=True)
+    digikala_variant_id: Mapped[str] = mapped_column(String(64))
+    old_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = no cost before
+    new_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = cost cleared
+    source: Mapped[str] = mapped_column(String(16))  # manual | file
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class FloorSetting(Base):
     """Profit-floor rule. Most specific scope wins: variant > brand > category > global."""
 

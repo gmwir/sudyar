@@ -1,6 +1,7 @@
-"""FastAPI app: 4 screens (Today, Radar, Floor, Settings), server-rendered Persian pages, HTMX partials.
+"""FastAPI app: 5 screens (Today, Radar, Floor, Buy costs, Settings), server-rendered Persian pages, HTMX partials.
 
-READ-ONLY: no route writes to Digikala or calls it. The only thing a POST changes is OUR settings table.
+READ-ONLY toward Digikala: no route writes to it or calls it. A POST may change only OUR tables:
+app_settings (alerts form), variant_costs and cost_audit (buy-cost page).
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,15 +23,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from ..config import Settings
+from ..cost_import import MAX_UPLOAD_BYTES, MAX_UPLOAD_ROWS, CostImportError, apply_plan
+from ..costs import set_cost
 from ..models import Variant, utcnow
 from ..ui_settings import UiSettingsError, save_ui_settings
-from . import data, fmt
+from . import cost_page, data, fmt
 from .auth import LoginThrottle, PasswordGate, WebConfigError, check_bind, csrf_valid, new_csrf_token
 
 log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 ASSET_VERSION = "1"
-TABS = (("today", "امروز", "/"), ("radar", "رادار", "/radar"), ("floor", "کف قیمت", "/floor"), ("settings", "تنظیمات", "/settings"))
+TABS = (("today", "امروز", "/"), ("radar", "رادار", "/radar"), ("floor", "کف قیمت", "/floor"), ("costs", "قیمت خرید", "/costs"), ("settings", "تنظیمات", "/settings"))
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 
@@ -46,6 +49,10 @@ class RowCache:
         self.ttl, self._clock, self._lock = ttl, clock, threading.Lock()
         self._at = -1e18
         self._rows = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._rows = None
 
     def get(self, build: Callable[[], list]):
         if self.ttl <= 0:
@@ -72,6 +79,7 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
     gate = PasswordGate(web_password)
     throttle = LoginThrottle()
     cache = RowCache(cache_seconds)
+    previews = cost_page.PreviewStore()
     app = FastAPI(title="Sudyar", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.session_factory, app.state.gate = settings, session_factory, gate
     app.state.cache, app.state.now_fn = cache, now_fn
@@ -84,7 +92,8 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
     env = templates.env
     env.filters.update(fa=fmt.fa, toman=lambda v: fmt.toman_text(v), ago=lambda dt: fmt.time_ago(dt, now_fn()))
     env.globals.update(unknown=fmt.UNKNOWN, tiers=data.TIERS, tier_fa=data.TIER_FA, status_fa=data.STATUS_FA,
-                       max_rows=data.MAX_ROWS, hour_label=lambda h: fmt.fa(f"{int(h):02d}:00"))
+                       max_rows=data.MAX_ROWS, hour_label=lambda h: fmt.fa(f"{int(h):02d}:00"),
+                       max_upload_mb=MAX_UPLOAD_BYTES // 1_000_000, max_upload_rows=MAX_UPLOAD_ROWS)
 
     # ------------------------------------------------------------------ helpers
     def get_session():
@@ -253,6 +262,96 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
             raise HTTPException(status_code=404)
         d = data.build_floor_detail(session, data.make_engine(settings), v, now_fn())
         return render(request, "_floor_detail.html", d=d)
+
+    # ------------------------------------------------------------------ buy costs (local data only)
+    def costs_ctx(session: Session, q: str = "", page: int = 1, **extra):
+        return dict(v=cost_page.build_costs(session, q, page), **extra)
+
+    @app.get("/costs", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def costs_page(request: Request, q: str = "", page: int = 1, saved: int | None = None,
+                   session: Session = Depends(get_session)):
+        notice = None
+        if saved is not None and 0 <= saved <= 100_000:
+            notice = (True, f"{fmt.fa(saved)} قیمت خرید ذخیره شد." if saved else "تغییری لازم نبود؛ همه‌چیز از قبل همین بود.")
+        return render(request, "costs.html", "costs", title="قیمت خرید", notice=notice, preview=None,
+                      **costs_ctx(session, q, page))
+
+    @app.get("/costs/audit", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def costs_audit(request: Request, session: Session = Depends(get_session)):
+        return render(request, "_cost_audit.html", lines=cost_page.audit_lines(session))
+
+    @app.post("/costs/upload", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def costs_upload(request: Request, session: Session = Depends(get_session), file: UploadFile = File(None),
+                     csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
+        verify_csrf(request, csrf_token_f, x_csrf_token)
+        owner = request.session.get("csrf", "")
+        if file is None or not file.filename:
+            return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
+                          notice=(False, "فایلی انتخاب نشده."), **costs_ctx(session))
+        content = file.file.read(MAX_UPLOAD_BYTES + 1)  # never read more than the limit
+        try:
+            pv = cost_page.make_preview(session, settings, file.filename, content)
+        except CostImportError as e:
+            session.rollback()
+            return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
+                          notice=(False, cost_page.file_error_fa(str(e))), **costs_ctx(session))
+        token = previews.keep(owner, pv.to_apply) if pv.to_apply else None
+        return render(request, "costs.html", "costs", title="قیمت خرید", notice=None, token=token,
+                      preview=pv, **costs_ctx(session))
+
+    @app.post("/costs/apply", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def costs_apply(request: Request, session: Session = Depends(get_session), token: str = Form(""),
+                    csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
+        verify_csrf(request, csrf_token_f, x_csrf_token)
+        entries = previews.take(request.session.get("csrf", ""), token)
+        if entries is None:
+            return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
+                          notice=(False, "پیش‌نمایش منقضی شده؛ فایل را دوباره بارگذاری کنید."), **costs_ctx(session))
+        changed = apply_plan(session, entries, now_fn())
+        session.commit()
+        cache.clear()
+        return RedirectResponse(f"/costs?saved={changed}", status_code=303)
+
+    def cost_row_response(request: Request, session: Session, variant: Variant, status_code: int = 200,
+                          error: str | None = None, ok: str | None = None):
+        row = cost_page.cost_row(session, variant)
+        if not is_htmx(request):
+            if error:
+                return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
+                              notice=(False, error), **costs_ctx(session, variant.title or ""))
+            return RedirectResponse("/costs", status_code=303)
+        resp = render(request, "_cost_row.html", row=row, error=error, ok=ok)
+        resp.headers["HX-Trigger"] = "costs-changed"  # the "last 20 changes" box reloads itself
+        return resp
+
+    def variant_or_404(session: Session, variant_id: str) -> Variant:
+        v = session.scalar(select(Variant).where(Variant.digikala_variant_id == variant_id))
+        if v is None:
+            raise HTTPException(status_code=404)
+        return v
+
+    @app.post("/costs/{variant_id}", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def cost_save(request: Request, variant_id: str, session: Session = Depends(get_session), cost: str = Form(""),
+                  csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
+        verify_csrf(request, csrf_token_f, x_csrf_token)
+        v = variant_or_404(session, variant_id)
+        value, err = cost_page.manual_cost_error_fa(cost)
+        if err:
+            return cost_row_response(request, session, v, error=err)
+        changed = set_cost(session, v, value, "manual", now_fn())
+        session.commit()
+        cache.clear()
+        return cost_row_response(request, session, v, ok="ذخیره شد." if changed else "تغییری نکرد.")
+
+    @app.post("/costs/{variant_id}/clear", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def cost_clear(request: Request, variant_id: str, session: Session = Depends(get_session),
+                   csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
+        verify_csrf(request, csrf_token_f, x_csrf_token)
+        v = variant_or_404(session, variant_id)
+        changed = set_cost(session, v, None, "manual", now_fn())
+        session.commit()
+        cache.clear()
+        return cost_row_response(request, session, v, ok="قیمت خرید پاک شد." if changed else None)
 
     def settings_ctx(session: Session, **extra):
         return dict(c=data.build_connection(session, settings, now_fn()), a=data.build_alerts(session, settings), **extra)

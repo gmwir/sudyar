@@ -1,0 +1,9 @@
+{% if lines %}
+<ul class="audit">
+  {% for a, title in lines %}
+  <li><span>{{ title }}</span>
+    <span class="sub">{{ a.old_cost | toman if a.old_cost else 'بدون قیمت' }} ← {{ a.new_cost | toman if a.new_cost else 'پاک شد' }}
+      · {{ 'دستی' if a.source == 'manual' else 'فایل' }} · {{ a.changed_at | ago }}</span></li>
+  {% endfor %}
+</ul>
+{% else %}<p class="sub">هنوز تغییری ثبت نشده.</p>{% endif %}

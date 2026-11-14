@@ -79,10 +79,16 @@ def test_web_package_cannot_reach_digikala_or_write_anything_outside_our_db():
         assert "get_commissions_page" not in src and "get_sales_report_page" not in src and "get_winning_price" not in src
 
 
-def test_every_route_handler_that_writes_is_the_settings_form():
+ALLOWED_WRITE_ROUTES = {("/login", ("POST",)), ("/logout", ("POST",)), ("/settings/alerts", ("POST",)),
+                        ("/costs/upload", ("POST",)), ("/costs/apply", ("POST",)),
+                        ("/costs/{variant_id}", ("POST",)), ("/costs/{variant_id}/clear", ("POST",))}
+
+
+def test_every_route_handler_that_writes_is_known():
+    """Writers: login/logout (session only), alerts form (app_settings), buy-cost page (variant_costs + cost_audit)."""
     app = make_app()
     writes = {(r.path, tuple(sorted(r.methods))) for r in app.routes if hasattr(r, "methods") and r.methods & {"POST", "PUT", "PATCH", "DELETE"}}
-    assert writes == {("/login", ("POST",)), ("/logout", ("POST",)), ("/settings/alerts", ("POST",))}
+    assert writes == ALLOWED_WRITE_ROUTES
 
 
 def test_vendored_assets_documented_and_licensed():

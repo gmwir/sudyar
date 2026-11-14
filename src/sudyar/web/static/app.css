@@ -164,3 +164,19 @@ select, input[type=password], input[type=text] {
 .htmx-request .skeleton { opacity: .6; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media (min-width: 560px) { .app { border-inline: 1px solid var(--line); } }
+
+/* buy-cost page */
+.ic-costs { --icon: url("/static/icons/wallet.svg"); }
+.tablewrap { overflow-x: auto; }
+table.costs { width: 100%; border-collapse: collapse; }
+table.costs th { text-align: right; font-size: 12px; color: var(--ink-600); padding: 6px; }
+table.costs td { padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+.costform { display: flex; gap: 6px; align-items: center; }
+.costform input[type=text] { min-width: 110px; }
+.btn.sm { min-height: 40px; width: auto; padding: 6px 12px; }
+.linkbtn { background: none; border: 0; color: var(--danger); font: inherit; font-size: 12px; cursor: pointer; padding: 4px 0; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.audit { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.audit li { display: flex; flex-direction: column; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.c-danger { color: var(--danger); } .c-success { color: var(--success); } .c-warning { color: var(--warning); }
+input[type=file] { font: inherit; font-size: 14px; width: 100%; }
