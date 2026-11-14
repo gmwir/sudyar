@@ -262,3 +262,12 @@ def test_orders_sync_cli_rejects_bad_days(monkeypatch, tmp_path):
     monkeypatch.setenv("POSTGRES_PASSWORD", "pw")
     assert cli.main(["orders-sync", "--days", "0"]) == 2
     assert cli.main(["orders-sync", "--days", "99"]) == 2
+
+
+def test_orders_show_is_in_usage_and_bat_is_read_only():
+    from sudyar import __main__ as m
+
+    assert "orders-show" in m.USAGE
+    bat = (pathlib.Path(__file__).resolve().parent.parent / "9-orders-sync.bat").read_text()
+    assert "orders-sync --days 1" in bat and "orders-show" in bat
+    assert "DELETE" not in bat.upper()

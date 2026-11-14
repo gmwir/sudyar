@@ -360,7 +360,10 @@ docker compose exec worker python -m sudyar set-floor --scope category --key 101
 ```bash
 python -m sudyar orders-sync              # سه روز کامل اخیر (ORDERS_DEFAULT_DAYS)، تا دیروز
 python -m sudyar orders-sync --days 7 --force
+python -m sudyar orders-show              # فروش ذخیره‌شده‌ی دیروز (فقط از پایگاه داده، بدون تماس با دیجی‌کالا)
 ```
+
+دوبار کلیک روی `9-orders-sync.bat`: فروش دیروز را (فقط‌خواندنی) می‌خواند و فهرست تعداد و قیمت هر کالا را نشان می‌دهد تا با پنل مقایسه کنید.
 
 - فقط `GET /open-api/v1/orders/history` (و `GET /open-api/v1/orders`) خوانده می‌شود؛ سقف ۳۰ خواندن در ۳۰ ثانیه رعایت می‌شود و صفحه‌ها یکی‌یکی خوانده می‌شوند.
 - برای هر روز و هر کالا فقط این‌ها ذخیره می‌شود: شناسه‌ی تنوع، تعداد، قیمت فروش واحد، تاریخ. **نام، تلفن، آدرس، شماره‌ی سفارش یا ارسال ذخیره نمی‌شود.**

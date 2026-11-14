@@ -9,7 +9,7 @@ from .logging_setup import error_code, setup_logging, short_error
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
          "web [--host H] [--port N] | floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
-         "[--force] | orders-sync [--days N] [--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
+         "[--force] | orders-sync [--days N] [--force] | orders-show | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
 
 
 READ_ONLY_SCOPES = (  # official Service Hub scopes, all read-only
@@ -310,6 +310,27 @@ def sales_sync_cmd(args: list[str]) -> int:
     return 0
 
 
+def orders_show_cmd(args: list[str]) -> int:
+    """Print yesterday's saved sale lines (read from our own database only; no Digikala call)."""
+    from .models import utcnow
+    from .orders import daily_rows, yesterday_tehran
+
+    s = load_settings()
+    s.require_ok()
+    factory, _client = _build(s)
+    day = yesterday_tehran(utcnow())
+    with factory() as session:
+        rows = daily_rows(session, day)
+    print(f"Saved sales for {day} (Tehran day), prices exactly as stored (unit: {s.orders_price_unit}):")
+    if not rows:
+        print("  nothing saved for this day (run orders-sync first)")
+        return 0
+    print("  variant_id | quantity | unit_sale_price")
+    for r in rows:
+        print(f"  {r.product_variant_id} | {r.quantity} | {r.unit_sale_price}")
+    return 0
+
+
 def orders_sync_cmd(args: list[str]) -> int:
     from .models import utcnow
     from .orders import last_days, sync_orders
@@ -486,7 +507,7 @@ def main(argv: list[str]) -> int:
     setup_logging()
     cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
-    free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "orders-sync", "set-brand", "list-brands")  # take options
+    free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "orders-sync", "orders-show", "set-brand", "list-brands")  # take options
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2
@@ -503,6 +524,8 @@ def main(argv: list[str]) -> int:
             return sales_sync_cmd(argv[1:])
         if argv[0] == "orders-sync":
             return orders_sync_cmd(argv[1:])
+        if argv[0] == "orders-show":
+            return orders_show_cmd(argv[1:])
         if argv[0] == "set-brand":
             return set_brand_cmd(argv[1:])
         if argv[0] == "list-brands":
