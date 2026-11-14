@@ -79,7 +79,8 @@ def test_today_input_item_counts_only_real_missing_inputs(seeded):
 def test_today_never_claims_a_daily_profit_it_does_not_have(seeded):
     t = text(seeded[1].get("/"))
     assert "سود خالص دیروز (۲۲ آبان)" in t
-    assert "نامشخص" in t and "دیجی‌کالا فروش روزانه نمی‌دهد" in t
+    assert "دیجی‌کالا فروش روزانه نمی‌دهد" not in t     # Part 4c: real sales come from the Order API
+    assert "سود واقعی" not in t or "تومان" in t         # a "real profit" claim must carry a number
 
 
 def test_today_empty_database_is_honest():
@@ -270,13 +271,13 @@ def test_settings_connection_status_from_call_log(seeded):
     assert "کار می‌کند" in t                              # variants -> 200
     assert "هنوز بررسی نشده" in t                         # insight: never called
     assert "بعضی دسترسی‌ها کار نمی‌کنند" in t
-    for scope in ("variant", "commission", "insight"):
+    for scope in ("variant", "commission", "insight", "order"):
         assert f"({scope})" in t
     assert "pricing/buybox" not in t
 
 
 @pytest.mark.parametrize("statuses,expected", [
-    ({"/open-api/v1/variants": 200, "/open-api/v1/commissions/": 200, "/open-api/v1/insight/sales-reports": 200}, "متصل؛ هر سه دسترسی کار می‌کند"),
+    ({"/open-api/v1/variants": 200, "/open-api/v1/commissions/": 200, "/open-api/v1/insight/sales-reports": 200, "/open-api/v1/orders/history": 200}, "متصل؛ هر چهار دسترسی کار می‌کند"),
     ({"/open-api/v1/variants": 401}, "توکن منقضی شده"),
     ({}, "توکن ثبت شده؛ هنوز هیچ خواندنی انجام نشده"),
 ])

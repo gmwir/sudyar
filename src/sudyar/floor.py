@@ -321,6 +321,19 @@ class FloorEngine:
         comps = resolve_components(session, variant, self.s)
         return net_profit(price, cost, fees.commission_pct, comps)
 
+    async def profit_at_price(self, session: Session, variant: Variant, price_toman: float, now: datetime,
+                              allow_fetch: bool = False) -> float | None:
+        """Net profit per unit if the variant was sold at `price_toman` (Toman), with the SAME cost / commission /
+        manual-cost terms as the floor. None unless cost and commission are known (never guessed)."""
+        cost_row = session.get(VariantCost, variant.id)
+        cost = _valid_cost(cost_row.buy_cost if cost_row is not None else None)
+        if cost is None or price_toman is None or not math.isfinite(price_toman) or price_toman < 0:
+            return None
+        fees = await self._fees_for(session, variant, now, allow_fetch)
+        if fees is None:
+            return None
+        return net_profit(price_toman, cost, fees.commission_pct, resolve_components(session, variant, self.s))
+
     def label(self, result: FloorResult, win_price_toman: float | None) -> str:
         if result.status != OK:
             return result.status

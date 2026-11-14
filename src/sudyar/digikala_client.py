@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -13,6 +14,8 @@ from .rate_limiter import ApiError, RateLimiter
 log = logging.getLogger(__name__)
 
 SALES_RANGES = ("last_7_days", "last_14_days", "last_30_days")
+ORDER_TYPES = ("processed", "returned", "canceled")
+ORDER_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.000Z"  # the API's Y-m-d\\TH:i:s.v\\Z (UTC, milliseconds)
 
 # Called for every API attempt: (endpoint, http_status_or_None, seconds)
 CallLogger = Callable[[str, int | None, float], None]
@@ -111,6 +114,27 @@ class DigikalaClient:
         if s.fees_main_category_id:
             params["search[main_category_id]"] = s.fees_main_category_id
         return await self.get_page(s.commissions_path, params)
+
+    async def get_orders_page(self, order_type: str, created_from: datetime, created_to: datetime,
+                              page: int) -> tuple[list[dict[str, Any]], int | None]:
+        """GET /open-api/v1/orders/history (scope: order). READ-ONLY.
+
+        Only the two list endpoints are allowed. DELETE /orders/{order_item_id} exists under the same scope
+        and is unreachable from here: no such method exists and any non-GET method is refused.
+        """
+        from .config import ALLOWED_ORDERS_PATHS
+
+        s = self.settings
+        if s.orders_path not in ALLOWED_ORDERS_PATHS:
+            raise ReadOnlyViolation("Blocked: only the GET list endpoints of the Order API may be called.")
+        if order_type not in ORDER_TYPES:
+            raise ValueError(f"order_type must be one of {', '.join(ORDER_TYPES)}")
+        params: dict[str, Any] = {
+            s.page_param: page, s.page_size_param: s.page_size, "order_type": order_type,
+            "order_created_at_from": created_from.strftime(ORDER_TS_FORMAT),
+            "order_created_at_to": created_to.strftime(ORDER_TS_FORMAT),
+        }
+        return await self.get_page(s.orders_path, params)
 
     async def get_sales_report_page(self, range_: str, page: int | None = None,
                                     category_id: str | None = None) -> tuple[list[dict[str, Any]], int | None]:

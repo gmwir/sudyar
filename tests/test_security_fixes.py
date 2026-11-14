@@ -475,16 +475,16 @@ def test_check_config_lists_scopes(monkeypatch, tmp_path, capsys):
     assert cli.main(["check-config"]) == 0
     out = capsys.readouterr().out
     scopes = [line.strip().split(":")[0][2:] for line in out.splitlines() if line.startswith("  - ")]
-    assert scopes == ["variant", "commission", "insight"]                     # exactly the 3 official scopes
+    assert scopes == ["variant", "commission", "insight", "order"]           # exactly the 4 official scopes
     assert "pricing/buybox" not in out.split("Token scopes needed")[1].split("Notifications")[0].split("GET")[0]
     assert "winning-price" in out and "READ-ONLY" in out and "no write scope is needed" in out
 
 
 def test_readme_lists_scopes():
     text = (ROOT / "README_FA.md").read_text()
-    assert "| `variant` |" in text and "| `commission` |" in text and "| `insight` |" in text
+    assert all(f"| `{k}` |" in text for k in ("variant", "commission", "insight", "order"))
     assert "| `pricing/buybox` |" not in text and "| `variants` |" not in text and "| `commissions` |" not in text
-    assert "این سه دسترسی" in text and "چهار بخش" not in text
+    assert "این چهار" in text and "چهار بخش" not in text
     assert "Self Token" in text and "فقط خواندن" in text
 
 

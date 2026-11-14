@@ -212,8 +212,10 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
 
     @app.get("/partials/profit", dependencies=[Depends(require_auth)], include_in_schema=False)
     def profit_partial(request: Request, session: Session = Depends(get_session)):
-        p = data.build_profit(session, data.make_engine(settings), now_fn())
-        return render(request, "_profit.html", p=p)
+        engine, now = data.make_engine(settings), now_fn()
+        y = data.build_yesterday(session, engine, settings, now)
+        p = data.build_profit(session, engine, now) if y.state != "ok" else None  # estimate = fallback only
+        return render(request, "_profit.html", y=y, p=p)
 
     @app.get("/radar", dependencies=[Depends(require_auth)], include_in_schema=False)
     def radar(request: Request, tier: str | None = None, session: Session = Depends(get_session)):

@@ -9,13 +9,14 @@ from .logging_setup import error_code, setup_logging, short_error
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
          "web [--host H] [--port N] | floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
-         "[--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
+         "[--force] | orders-sync [--days N] [--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
 
 
 READ_ONLY_SCOPES = (  # official Service Hub scopes, all read-only
     ("variant", "GET /open-api/v1/variants and GET /open-api/v1/pricing/buybox/price-suggestion/winning-price (+ nth-rank-winning-price)"),
     ("commission", "GET /open-api/v1/commissions/"),
     ("insight", "GET /open-api/v1/insight/sales-reports"),
+    ("order", "GET /open-api/v1/orders/history (and GET /open-api/v1/orders); NEVER the DELETE under the same scope"),
 )
 
 
@@ -242,7 +243,7 @@ def _api_hint(e: Exception) -> str:
         return f"{e}"
     msg = short_error(e)
     if error_code(e) in ("HTTP-401", "HTTP-403"):
-        msg += "  (check the Self Token scopes: sync-fees needs 'commission', sales-sync needs 'insight', variants and winning-price need 'variant')"
+        msg += "  (check the Self Token scopes: sync-fees needs 'commission', sales-sync needs 'insight', orders-sync needs 'order', variants and winning-price need 'variant')"
     return msg
 
 
@@ -306,6 +307,41 @@ def sales_sync_cmd(args: list[str]) -> int:
         print(f"Sales for {range_} were read less than 24 h ago: using the saved data (use --force to re-read).")
         return 0
     print(f"Sales saved for {range_}: {r.rows} products ({r.pages} pages)" + ("; STOPPED at SALES_MAX_PAGES" if r.truncated else ""))
+    return 0
+
+
+def orders_sync_cmd(args: list[str]) -> int:
+    from .models import utcnow
+    from .orders import last_days, sync_orders
+
+    s = load_settings()
+    s.require_ok()
+    try:
+        n = _opt(args, "--days", int, s.orders_default_days)
+    except ValueError:
+        n = 0
+    if not 1 <= n <= 14:
+        print("Invalid options: --days must be a whole number between 1 and 14")
+        return 2
+    factory, client = _build(s)
+    now = utcnow()
+
+    async def main():
+        async with client:
+            with factory() as session:
+                return await sync_orders(client, session, s, last_days(now, n), now, "--force" in args)
+
+    try:
+        r = asyncio.run(main())
+    except Exception as e:
+        print(f"orders-sync failed: {_api_hint(e)}")
+        return 1
+    for d in r.days:
+        if d.cached:
+            print(f"{d.day}: read less than {s.orders_cache_seconds // 3600} h ago, using saved data (use --force to re-read)")
+        else:
+            print(f"{d.day}: {d.lines} sale lines saved ({d.items} order lines, {d.pages} pages, "
+                  f"{d.canceled_dropped} canceled dropped, {d.duplicates_dropped} duplicates, {d.rejected} rejected)")
     return 0
 
 
@@ -450,7 +486,7 @@ def main(argv: list[str]) -> int:
     setup_logging()
     cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
-    free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "set-brand", "list-brands")  # take options
+    free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "orders-sync", "set-brand", "list-brands")  # take options
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2
@@ -465,6 +501,8 @@ def main(argv: list[str]) -> int:
             return set_floor_cmd(argv[1:])
         if argv[0] == "sales-sync":
             return sales_sync_cmd(argv[1:])
+        if argv[0] == "orders-sync":
+            return orders_sync_cmd(argv[1:])
         if argv[0] == "set-brand":
             return set_brand_cmd(argv[1:])
         if argv[0] == "list-brands":

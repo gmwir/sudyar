@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,8 +14,9 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..fees import LIMIT_MESSAGE_FA, ORPHAN_MESSAGE_FA, FeeProvider
 from ..floor import (COMPONENTS, OK, FloorEngine, FloorResult, resolve_components, resolve_setting, to_toman)
-from ..models import (ApiCallLog, ProductSales, RadarEvent, Variant, VariantCost, VariantSnapshot)
+from ..models import (ApiCallLog, DailySales, ProductSales, RadarEvent, Variant, VariantCost, VariantSnapshot)
 from ..notifier import CAUSE_FA
+from ..orders import ASSUMPTIONS_FA, orders_synced_at, yesterday_tehran
 from ..radar import BUYBOX_LOST, determine_cause
 from ..sales import sales_synced_at
 from ..tiers import CALM, HOT, TIERS, WARM, aware, classify_tiers, last_snapshot_times
@@ -390,7 +391,75 @@ def stale_warnings(session: Session, s: Settings, now: datetime) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------- profit card
+# ---------------------------------------------------------------- yesterday's ACTUAL profit (Order API)
+@dataclass
+class YesterdayView:
+    state: str  # ok | no_sales | nothing_usable | no_data | no_scope | expired
+    day: date | None = None
+    total_toman: float | None = None
+    units: int = 0  # net units (returns subtracted) that went into the total
+    variants_used: int = 0
+    excluded: int = 0  # variants left out: cost/commission unknown, or variant unknown
+    synced_at: datetime | None = None
+    assumptions: str = ASSUMPTIONS_FA
+
+
+def orders_scope_problem(session: Session) -> str | None:
+    """'no_scope' / 'expired' if the LAST order call was refused (403 / 401); None otherwise."""
+    r = session.scalar(select(ApiCallLog).where(ApiCallLog.endpoint.like("/open-api/v1/orders%"))
+                       .order_by(ApiCallLog.called_at.desc(), ApiCallLog.id.desc()).limit(1))
+    if r is None:
+        return None
+    return {403: "no_scope", 401: "expired"}.get(r.status)
+
+
+def build_yesterday(session: Session, engine: FloorEngine, s: Settings, now: datetime) -> YesterdayView:
+    """Actual profit of the last complete Tehran day from stored order lines: sum over (net quantity x profit per unit
+    at the REAL sale price). Cost, commission and manual cost terms are the floor's own. Never guessed: a variant
+    without cost/commission is counted as excluded, and if nothing is usable no number is shown."""
+    day = yesterday_tehran(now)
+    problem = orders_scope_problem(session)
+    synced = orders_synced_at(session, day)
+    if synced is None:
+        return YesterdayView(problem or "no_data", day)
+    rows = list(session.scalars(select(DailySales).where(DailySales.day == day)))
+    if not rows:
+        return YesterdayView("no_sales", day, synced_at=synced)
+    engine.fees.preload(session)
+    total, units, used, excluded = 0.0, 0, 0, 0
+    by_variant: dict[str, list[DailySales]] = {}
+    for r in rows:
+        by_variant.setdefault(r.product_variant_id, []).append(r)
+    for pvid, lines in by_variant.items():
+        variant = (session.scalar(select(Variant).where(Variant.product_variant_id == pvid).limit(1))
+                   or session.scalar(select(Variant).where(Variant.digikala_variant_id == pvid)))
+        if variant is None:
+            excluded += 1
+            continue
+        part, part_units, ok = 0.0, 0, True
+        for ln in lines:
+            price = to_toman(ln.unit_sale_price, s.orders_price_unit)
+            try:
+                profit = _run_async(engine.profit_at_price(session, variant, price, now, allow_fetch=False))
+            except Exception:
+                profit = None
+            if profit is None:
+                ok = False
+                break
+            part += profit * ln.quantity
+            part_units += ln.quantity
+        if not ok:
+            excluded += 1
+            continue
+        total += part
+        units += part_units
+        used += 1
+    if not used:
+        return YesterdayView("nothing_usable", day, excluded=excluded, synced_at=synced)
+    return YesterdayView("ok", day, total, units, used, excluded, synced)
+
+
+# ---------------------------------------------------------------- profit card (7-day ESTIMATE, fallback)
 @dataclass
 class ProfitView:
     state: str  # ok | no_sales | nothing_usable
@@ -437,9 +506,10 @@ SCOPE_ENDPOINTS = {
     "variant": ("/open-api/v1/variants", "/open-api/v1/pricing/"),
     "commission": ("/open-api/v1/commissions",),
     "insight": ("/open-api/v1/insight/",),
+    "order": ("/open-api/v1/orders",),
 }
 SCOPE_FA = {"variant": "کالاها و قیمت پیشنهادی (variant)", "commission": "کمیسیون‌ها (commission)",
-            "insight": "آمار فروش (insight)"}
+            "insight": "آمار فروش (insight)", "order": "سفارش‌ها و فروش روزانه (order)"}
 
 
 @dataclass
@@ -487,7 +557,7 @@ def build_connection(session: Session, s: Settings, now: datetime) -> Connection
     elif "expired" in states:
         overall, text = "expired", "توکن منقضی شده؛ توکن تازه بسازید"
     elif all(x == "ok" for x in states):
-        overall, text = "ok", "متصل؛ هر سه دسترسی کار می‌کند"
+        overall, text = "ok", "متصل؛ هر چهار دسترسی کار می‌کند"
     elif all(x == "unknown" for x in states):
         overall, text = "unknown", "توکن ثبت شده؛ هنوز هیچ خواندنی انجام نشده"
     else:

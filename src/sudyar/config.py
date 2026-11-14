@@ -55,7 +55,11 @@ def load_dotenv(path: str | Path = ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-PATH_FIELDS = ("variants_path", "commissions_path", "sales_reports_path", "buybox_price_path", "nth_rank_price_path")
+PATH_FIELDS = ("variants_path", "commissions_path", "sales_reports_path", "buybox_price_path", "nth_rank_price_path",
+               "orders_path")
+# The ONLY order endpoints this app may call (both GET, scope "order"). DELETE /orders/{order_item_id} exists under
+# the same scope and must never be called: no other path is accepted.
+ALLOWED_ORDERS_PATHS = ("/open-api/v1/orders/history", "/open-api/v1/orders")
 DAY = 86_400
 NUMERIC_RANGES: dict[str, tuple[float, float]] = {
     "postgres_port": (1, 65535), "page_size": (1, 1000),
@@ -69,8 +73,10 @@ NUMERIC_RANGES: dict[str, tuple[float, float]] = {
     "winning_price_cache_seconds": (0, DAY), "notify_cooldown_seconds": (0, 7 * DAY),
     "fees_cache_seconds": (0, 30 * DAY), "fees_max_pages": (1, 10_000), "fees_max_drop_pct": (0, 100),
     "fees_max_stale_days": (0, 365), "sales_cache_seconds": (0, 30 * DAY), "sales_max_pages": (1, 1000),
+    "orders_cache_seconds": (0, 30 * DAY), "orders_max_pages": (1, 1000), "orders_default_days": (1, 14),
 }
-ENV_NAMES = {"base_url": "DIGIKALA_BASE_URL", "variants_path": "DIGIKALA_VARIANTS_PATH",
+ENV_NAMES = {"orders_path": "ORDERS_PATH", "orders_price_unit": "ORDERS_PRICE_UNIT",
+             "orders_discount_mode": "ORDERS_DISCOUNT_MODE", "base_url": "DIGIKALA_BASE_URL", "variants_path": "DIGIKALA_VARIANTS_PATH",
              "commissions_path": "FEES_COMMISSIONS_PATH", "sales_reports_path": "SALES_REPORTS_PATH",
              "price_unit": "DIGIKALA_PRICE_UNIT", "suggested_price_unit": "DIGIKALA_SUGGESTED_PRICE_UNIT"}
 
@@ -156,6 +162,16 @@ class Settings(BaseModel):
     sales_reports_path: str = "/open-api/v1/insight/sales-reports"
     sales_cache_seconds: float = 86400
     sales_max_pages: int = 50
+    # GET /open-api/v1/orders/history (scope: order), READ-ONLY. order_type = processed | returned | canceled.
+    orders_path: str = "/open-api/v1/orders/history"
+    orders_cache_seconds: float = 21600  # a day is re-read at most every 6 h (returns can change it later)
+    orders_max_pages: int = 50  # per day and order type; a day that does not fit is NOT stored (never partial)
+    orders_default_days: int = 3  # yesterday and the 2 days before (late returns change old days)
+    # UNVERIFIED ASSUMPTIONS (no real response could be read): unit_price is in RIAL like the other Digikala
+    # prices, and it is the price BEFORE unit_discount ("subtract" = net unit price is unit_price - unit_discount).
+    # Flip these if a real response shows otherwise: ORDERS_PRICE_UNIT=toman, ORDERS_DISCOUNT_MODE=ignore.
+    orders_price_unit: str = "rial"
+    orders_discount_mode: str = "subtract"  # subtract | ignore
     # Variant list items have category_id and supplier_code (used as SKU). They have NO brand field.
     # Safety nets for the commissions table
     fees_max_drop_pct: float = 30  # refuse a sync that has this % fewer rows than the last good one
@@ -189,6 +205,29 @@ class Settings(BaseModel):
         if (not v.startswith("/") or v.startswith("//") or "://" in v or "\\" in v
                 or ".." in v.split("/") or "?" in v or "#" in v or any(c.isspace() for c in v)):
             raise ValueError("must be a path starting with a single '/' (no host, no '..', no query)")
+        return v
+
+    @field_validator("orders_path")
+    @classmethod
+    def _orders_path_allowed(cls, v: str) -> str:
+        if v not in ALLOWED_ORDERS_PATHS:
+            raise ValueError("must be exactly /open-api/v1/orders/history or /open-api/v1/orders (read-only list endpoints)")
+        return v
+
+    @field_validator("orders_price_unit")
+    @classmethod
+    def _orders_unit(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("rial", "toman"):
+            raise ValueError("must be rial or toman")
+        return v
+
+    @field_validator("orders_discount_mode")
+    @classmethod
+    def _orders_discount(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("subtract", "ignore"):
+            raise ValueError("must be subtract or ignore")
         return v
 
     @field_validator("price_unit", "suggested_price_unit")
@@ -329,6 +368,12 @@ def load_settings() -> Settings:
     put("sales_reports_path", "SALES_REPORTS_PATH")
     put("sales_cache_seconds", "SALES_CACHE_SECONDS", float)
     put("sales_max_pages", "SALES_MAX_PAGES", int)
+    put("orders_path", "ORDERS_PATH")
+    put("orders_cache_seconds", "ORDERS_CACHE_SECONDS", float)
+    put("orders_max_pages", "ORDERS_MAX_PAGES", int)
+    put("orders_default_days", "ORDERS_DEFAULT_DAYS", int)
+    put("orders_price_unit", "ORDERS_PRICE_UNIT")
+    put("orders_discount_mode", "ORDERS_DISCOUNT_MODE")
     put("fees_max_drop_pct", "FEES_MAX_DROP_PCT", float)
     put("fees_max_stale_days", "FEES_MAX_STALE_DAYS", float)
     put("bale_allowed_hosts", "BALE_ALLOWED_HOSTS")

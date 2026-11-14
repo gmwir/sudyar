@@ -207,9 +207,9 @@ async def test_report_counts_manual_floors_as_needs_fees_when_stale(session):
 
 
 # ---------- README: 3b scopes ----------
-def test_readme_3b_section_lists_the_three_scopes():
+def test_readme_3b_section_lists_the_four_scopes():
     text = (ROOT / "README_FA.md").read_text()
     section = text.split("## توکن شما این دسترسی‌ها را لازم دارد")[1].split("اگر پیام «check the Self Token scopes»")[0]
-    assert "- **variant**" in section and "- **commission**" in section and "- **insight**" in section
+    assert all(f"- **{k}**" in section for k in ("variant", "commission", "insight", "order"))
     assert "pricing/buybox" not in section and "commissions**" not in section
-    assert section.count("- **") == 3
+    assert section.count("- **") == 4

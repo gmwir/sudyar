@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import JSON, CheckConstraint, UniqueConstraint, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, CheckConstraint, Date, UniqueConstraint, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -209,3 +209,19 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DailySales(Base):
+    """Real sales per Tehran day and variant, from the Order API. NO personal data and NO order ids are stored.
+
+    quantity is NET (processed minus returned, returns counted on the day the order was created).
+    unit_sale_price is in the unit Digikala returned (Rial by default) after the discount rule in config.
+    """
+
+    __tablename__ = "daily_sales"
+
+    day: Mapped["date"] = mapped_column(Date, primary_key=True)
+    product_variant_id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    unit_sale_price: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -4,10 +4,8 @@
 
 <section class="hero" aria-labelledby="profit-title">
   <p class="label" id="profit-title">سود خالص دیروز ({{ view.yesterday }})</p>
-  <p class="big unknown">{{ unknown }}</p>
-  <p class="sub">دیجی‌کالا فروش روزانه نمی‌دهد، پس سود دقیق دیروز ساخته نمی‌شود.</p>
   <div class="est" id="profit-est" hx-get="/partials/profit" hx-trigger="load" hx-swap="innerHTML">
-    <p class="skeleton">در حال حساب کردن تخمین ۷ روز اخیر…</p>
+    <p class="skeleton">در حال حساب کردن سود دیروز…</p>
   </div>
 </section>
 
