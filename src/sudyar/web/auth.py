@@ -32,6 +32,23 @@ def check_bind(host: str, password: str | None, allow_container_bind: bool = Fal
         "Set WEB_PASSWORD in .env, or use --host 127.0.0.1.")
 
 
+SERVER_MIN_PASSWORD = 12
+SERVER_MIN_SECRET = 32
+
+
+def server_mode_errors(password: str | None, secret_key: str | None) -> list[str]:
+    """SUDYAR_SERVER=1 (public server behind HTTPS): what is missing. Empty list = OK to start.
+
+    On a server the container bind exception must NOT apply: the reverse proxy makes the page public.
+    """
+    errors = []
+    if not password or len(password) < SERVER_MIN_PASSWORD:
+        errors.append(f"WEB_PASSWORD must be set and at least {SERVER_MIN_PASSWORD} characters on a server")
+    if not secret_key or len(secret_key) < SERVER_MIN_SECRET:
+        errors.append(f"WEB_SECRET_KEY must be set and at least {SERVER_MIN_SECRET} characters on a server")
+    return errors
+
+
 class PasswordGate:
     """Holds only a salted hash of the password (never the plain text) and compares in constant time."""
 

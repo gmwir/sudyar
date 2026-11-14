@@ -477,12 +477,24 @@ def web_cmd(args: list[str]) -> int:
     https_only = os.environ.get("WEB_HTTPS_ONLY_COOKIE", "").lower() in ("1", "true", "yes")
     proxies = tuple(p.strip() for p in os.environ.get("WEB_TRUSTED_PROXIES", "").split(",") if p.strip())
     s = load_settings()
+    server = os.environ.get("SUDYAR_SERVER", "").lower() in ("1", "true", "yes")
+    allow_container_bind = os.environ.get("WEB_ALLOW_CONTAINER_BIND", "").lower() in ("1", "true", "yes")
+    if server:
+        from .web.auth import server_mode_errors
+
+        errors = server_mode_errors(password, os.environ.get("WEB_SECRET_KEY") or None)
+        if not proxies:
+            errors.append("WEB_TRUSTED_PROXIES must name the HTTPS proxy on a server (deploy/docker-compose.server.yml sets it)")
+        if errors:
+            print("Refusing to start in server mode (SUDYAR_SERVER=1):\n  - " + "\n  - ".join(errors))
+            return 1
+        https_only, allow_container_bind = True, False  # public behind HTTPS: cookie Secure, password always on
     if host not in ("127.0.0.1", "localhost", "::1") and not https_only:
         print("WARNING: the web UI is reachable from other machines but the login cookie is not HTTPS-only. "
               "On a server, put it behind HTTPS and set WEB_HTTPS_ONLY_COOKIE=1.")
     try:
         app = create_app(s, web_password=password, bind_host=host,
-                         allow_container_bind=os.environ.get("WEB_ALLOW_CONTAINER_BIND", "").lower() in ("1", "true", "yes"),
+                         allow_container_bind=allow_container_bind,
                          https_only_cookie=https_only, trusted_proxies=proxies,
                          secret_key=os.environ.get("WEB_SECRET_KEY") or None)
     except WebConfigError as e:
