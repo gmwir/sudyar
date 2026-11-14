@@ -271,3 +271,15 @@ def test_orders_show_is_in_usage_and_bat_is_read_only():
     bat = (pathlib.Path(__file__).resolve().parent.parent / "9-orders-sync.bat").read_text()
     assert "orders-sync --days 1" in bat and "orders-show" in bat
     assert "DELETE" not in bat.upper()
+
+
+def test_order_status_object_from_the_real_panel_shape():
+    """Real item shape seen on the seller panel: order_status / sell_type are {key, title}; created_at has +03:30."""
+    s = Settings(digikala_self_token="t", postgres_password="p")
+    base = {"product_variant_id": 73442722, "quantity": 2, "unit_price": 14433800, "unit_discount": 0,
+            "total_price": 28867600, "order_created_at": "2026-11-15T00:59:02+03:30", "sell_type": {"key": "b2c"}}
+    ok = parse_order_line({**base, "order_status": {"key": "processed", "title": "x"}}, "processed", s)
+    assert ok == (date(2026, 11, 15), "73442722", 2, 14433800)
+    assert parse_order_line({**base, "order_status": {"key": "canceled"}}, "processed", s) is None
+    assert parse_order_line({**base, "order_status": {"key": "returned"}}, "processed", s) is None
+    assert parse_order_line({**base, "order_status": {"key": "returned"}}, "returned", s)[2] == -2

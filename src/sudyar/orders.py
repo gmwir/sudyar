@@ -104,6 +104,14 @@ def parse_order_line(raw: dict[str, Any], order_type: str, s: Settings) -> tuple
     """
     if order_type == "processed" and raw.get("cancellation_info"):
         return None  # canceled: excluded
+    st = raw.get("order_status")
+    status = (st.get("key") if isinstance(st, dict) else st) or ""
+    status = str(status).strip().lower()
+    # Verified on the seller panel (15 Nov 2026): order_status is {"key": "processed"|"returned"|"canceled", "title"}.
+    if status in ("canceled", "cancelled"):
+        return None  # canceled: excluded
+    if order_type == "processed" and status == "returned":
+        return None  # counted once, from the "returned" request (no double counting)
     pvid = raw.get("product_variant_id")
     qty = _int(raw.get("quantity"))
     price = _int(raw.get("unit_price"))
