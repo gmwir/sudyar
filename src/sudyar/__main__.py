@@ -8,7 +8,7 @@ from .logging_setup import error_code, setup_logging, short_error
 
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
-         "floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
+         "web [--host H] [--port N] | floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
          "[--force] | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | healthcheck]")
 
 
@@ -400,6 +400,35 @@ def list_brands_cmd(args: list[str]) -> int:
     return 0
 
 
+def web_cmd(args: list[str]) -> int:
+    """Start the Persian web UI. Default 127.0.0.1:8080. A non-localhost bind needs WEB_PASSWORD."""
+    import os
+
+    from .web.app import create_app
+    from .web.auth import WebConfigError
+
+    host = _opt(args, "--host", str, "127.0.0.1")
+    port = _opt(args, "--port", int, 8080)
+    if not 1 <= port <= 65535:
+        print("Invalid options: --port must be between 1 and 65535")
+        return 2
+    password = os.environ.get("WEB_PASSWORD") or None
+    s = load_settings()
+    try:
+        app = create_app(s, web_password=password, bind_host=host,
+                         allow_container_bind=os.environ.get("WEB_ALLOW_CONTAINER_BIND", "").lower() in ("1", "true", "yes"),
+                         https_only_cookie=os.environ.get("WEB_HTTPS_ONLY_COOKIE", "").lower() in ("1", "true", "yes"),
+                         secret_key=os.environ.get("WEB_SECRET_KEY") or None)
+    except WebConfigError as e:
+        print(str(e))
+        return 1
+    import uvicorn
+
+    print(f"Sudyar web UI on http://{host}:{port}  ({'password required' if password else 'no password: localhost only'})")
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False, proxy_headers=False, server_header=False)
+    return 0
+
+
 def run_sync() -> int:
     from .sync import sync_variants
 
@@ -421,7 +450,7 @@ def main(argv: list[str]) -> int:
     setup_logging()
     cmds = {"check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
-    free = ("sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "set-brand", "list-brands")  # take options
+    free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "set-brand", "list-brands")  # take options
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2
@@ -430,6 +459,8 @@ def main(argv: list[str]) -> int:
             return import_costs_cmd(argv[1:])
         if argv[0] == "floor-report":
             return floor_report_cmd(argv[1:])
+        if argv[0] == "web":
+            return web_cmd(argv[1:])
         if argv[0] == "set-floor":
             return set_floor_cmd(argv[1:])
         if argv[0] == "sales-sync":

@@ -48,5 +48,21 @@ services:
     profiles: ["radar"]
     command: ["sh", "-c", "until alembic upgrade head; do sleep 5; done; python -m sudyar radar-run"]
 
+  # Persian web UI. Reachable ONLY from this computer: the port is published on the host's 127.0.0.1.
+  web:
+    <<: *app
+    command: ["sh", "-c", "until alembic upgrade head; do sleep 5; done; python -m sudyar web --host 0.0.0.0 --port 8080"]
+    environment:
+      POSTGRES_HOST: db
+      WEB_ALLOW_CONTAINER_BIND: "1"   # the process listens on 0.0.0.0 inside the container; the host side is 127.0.0.1 only
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
 volumes:
   pgdata:

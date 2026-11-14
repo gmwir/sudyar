@@ -127,8 +127,8 @@ class Settings(BaseModel):
     notify_channels: str = "telegram"  # comma list: telegram,bale
     notify_event_types: str = "BUYBOX_LOST,BUYBOX_REGAINED,ENTERED_CHALLENGE,STOCK_OUT,DEACTIVATED"
     notify_cooldown_seconds: float = 1800
-    notify_quiet_start: str = ""  # "HH:MM", empty = no quiet hours
-    notify_quiet_end: str = ""
+    notify_quiet_start: str = "23:00"  # "HH:MM", empty = no quiet hours (default 23:00-07:00)
+    notify_quiet_end: str = "07:00"
     notify_timezone: str = "Asia/Tehran"
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_chat_id: SecretStr = SecretStr("")

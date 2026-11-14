@@ -199,9 +199,9 @@ class Dispatcher:
             RadarEvent.notify_status.in_(("sent", "dry_run")))))
         return last is not None and (now - last).total_seconds() < self.s.notify_cooldown_seconds
 
-    async def _deliver(self, ev: RadarEvent) -> str:
+    async def _deliver(self, ev: RadarEvent, enabled: bool | None = None) -> str:
         text = render_message(ev)
-        if not self.s.notify_enabled:
+        if not (self.s.notify_enabled if enabled is None else enabled):
             self.emit(f"[DRY-RUN] (not sent)\n{text}\n")
             return "dry_run"
         ok = False
@@ -214,16 +214,19 @@ class Dispatcher:
         return "sent" if ok else "failed"
 
     async def dispatch(self, session: Session, events: list[RadarEvent], now: datetime) -> list[tuple[int, str]]:
+        from .ui_settings import effective_settings  # settings saved in the web UI override .env
+
+        eff = effective_settings(session, self.s)
         results = []
         for ev in events:
             if ev.type not in self.allowed:
                 continue
-            if in_quiet_hours(now, self.s.notify_quiet_start, self.s.notify_quiet_end, self.s.notify_timezone):
+            if in_quiet_hours(now, eff.notify_quiet_start, eff.notify_quiet_end, eff.notify_timezone):
                 status = "suppressed_quiet"
             elif self._cooldown_active(session, ev, now):
                 status = "suppressed_cooldown"
             else:
-                status = await self._deliver(ev)
+                status = await self._deliver(ev, eff.notify_enabled)
             ev.notify_status = status
             if status in ("sent", "dry_run"):
                 ev.notified_at = now

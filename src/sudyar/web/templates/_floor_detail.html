@@ -1,0 +1,10 @@
+<div class="detail" role="region" aria-label="جزئیات کف قیمت">
+  <div class="final">کف قیمت: {{ d.floor_text }} <span class="chip {% if d.status == 'ok' %}success{% else %}warning{% endif %}">{{ d.status_fa }}</span></div>
+  {% for t in d.terms %}
+  <div class="term{% if t.missing %} missing{% endif %}">
+    <span class="k">{{ t.label }}</span>
+    <span class="v">{{ t.value }}{% if t.source %}<span class="src">{{ t.source }}</span>{% endif %}</span>
+  </div>
+  {% endfor %}
+  {% if d.note %}<p class="muted pad8">{{ d.note }}</p>{% endif %}
+</div>

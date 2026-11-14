@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>امروز</h1><p class="sub">امیران یدک · {{ jdate }}</p></div>
+
+<section class="hero" aria-labelledby="profit-title">
+  <p class="label" id="profit-title">سود خالص دیروز ({{ view.yesterday }})</p>
+  <p class="big unknown">{{ unknown }}</p>
+  <p class="sub">دیجی‌کالا فروش روزانه نمی‌دهد، پس سود دقیق دیروز ساخته نمی‌شود.</p>
+  <div class="est" id="profit-est" hx-get="/partials/profit" hx-trigger="load" hx-swap="innerHTML">
+    <p class="skeleton">در حال حساب کردن تخمین ۷ روز اخیر…</p>
+  </div>
+</section>
+
+<h2>کارهای امروز</h2>
+{% if view.nothing_to_do %}
+<div class="card ok-state"><b class="c-success">امروز کاری لازم نیست ✓</b><p class="sub">باخت بای‌باکس، اطلاعات ناقص یا داده‌ی کهنه‌ای پیدا نشد.</p></div>
+{% else %}
+{% for it in view.items %}
+<section class="todo">
+  <div class="head"><span class="n">{{ loop.index | fa }}</span><span>{{ it.title }}</span></div>
+  <ul>{% for l in it.lines %}<li>{{ l }}</li>{% endfor %}</ul>
+  <a class="go" href="{{ it.href }}">دیدن جزئیات</a>
+</section>
+{% endfor %}
+{% endif %}
+<p class="muted">همه‌ی عددها از پایگاه داده‌ی خودتان می‌آیند؛ چیزی حدس زده نمی‌شود.</p>
+{% endblock %}

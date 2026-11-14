@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>رادار بای‌باکس</h1><p class="sub">امیران یدک · آخرین به‌روزرسانی {{ view.last_update | ago }}</p></div>
+<div class="stats" aria-label="خلاصه">
+  <div class="stat"><b class="c-danger">{% if view.below_floor is none %}—{% else %}{{ view.below_floor | fa }}{% endif %}</b><span>زیر کف قیمت</span></div>
+  <div class="stat"><b class="c-warning">{{ view.lost | fa }}</b><span>از دست رفته</span></div>
+  <div class="stat"><b class="c-success">{{ view.win | fa }}</b><span>برنده بای‌باکس</span></div>
+</div>
+{% include "_radar_main.html" %}
+{% endblock %}

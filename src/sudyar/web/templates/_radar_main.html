@@ -1,0 +1,33 @@
+<div id="radar-main" class="page flush">
+  <div class="filters" role="group" aria-label="فیلتر گروه">
+    {% for key, label, cls in filters %}
+    <a class="chip {{ cls }}" href="/radar{% if key %}?tier={{ key }}{% endif %}" hx-get="/radar{% if key %}?tier={{ key }}{% endif %}" hx-target="#radar-main" hx-swap="outerHTML" hx-push-url="true"{% if (view.tier_filter or '') == key %} aria-current="true"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </div>
+  {% if view.empty %}
+  <div class="card ok-state"><b>هنوز کالایی خوانده نشده</b><p class="sub">ابتدا «۲» (خواندن کالاها) را بزنید.</p></div>
+  {% endif %}
+  {% for t in tiers %}
+  {% set rows = view.groups[t] %}
+  {% if view.totals[t] and (not view.tier_filter or view.tier_filter == t) %}
+  <div class="group-title"><span class="chip {{ t | lower }}">{{ tier_fa[t] }}</span><span class="muted">{{ view.totals[t] | fa }} کالا</span></div>
+  <ul class="list">
+    {% for r in rows %}
+    <li class="row">
+      <span class="chip {% if r.state == 'win' %}win{% elif r.state == 'lost' %}danger{% else %}neutral{% endif %}">{% if r.state == 'win' %}برنده{% elif r.state == 'lost' %}از دست رفته{% else %}نامشخص{% endif %}</span>
+      <div class="col">
+        <span class="t" dir="auto">{{ r.variant.title or 'بدون عنوان' }}</span>
+        <span class="s">
+          {% if r.state == 'win' %}قیمت شما {{ r.price_toman | toman }} · برنده بای‌باکس
+          {% else %}شما {{ r.price_toman | toman }} · بای‌باکس {{ r.buybox_toman | toman }}{% endif %}
+        </span>
+        {% if r.reason %}<span class="s why">علت: {{ r.reason }}</span>{% endif %}
+        <span class="s">آخرین بررسی: {{ r.last_check | ago }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if view.hidden[t] %}<p class="muted">{{ view.hidden[t] | fa }} کالای دیگر در این گروه هست؛ فقط {{ max_rows | fa }} مورد اول نشان داده شد.</p>{% endif %}
+  {% endif %}
+  {% endfor %}
+</div>

@@ -199,3 +199,13 @@ class ProductSales(Base):
     visit_count: Mapped[int | None] = mapped_column(Integer)
     conversion_rate: Mapped[float | None] = mapped_column(Float)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppSetting(Base):
+    """Settings edited in the web UI (alert hour, quiet hours, notify on/off). Key -> JSON value."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

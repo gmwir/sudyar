@@ -1,0 +1,14 @@
+{% if p.state == "ok" %}
+<p class="label sub">تخمین سود {{ p.range_fa }} (فروش × سود هر عدد با قیمت امروز)</p>
+<p class="big mid {% if p.total_toman < 0 %}c-danger{% else %}c-success{% endif %}">{{ p.total_toman | toman }}</p>
+<p class="sub">بر اساس {{ p.products_used | fa }} محصول و {{ p.units | fa }} عدد فروش.
+{% if p.excluded_multi or p.excluded_missing %}
+{{ (p.excluded_multi + p.excluded_missing) | fa }} محصول کنار گذاشته شد
+({% if p.excluded_missing %}{{ p.excluded_missing | fa }} بدون قیمت خرید یا کمیسیون{% endif %}{% if p.excluded_missing and p.excluded_multi %}، {% endif %}{% if p.excluded_multi %}{{ p.excluded_multi | fa }} چندتنوعی{% endif %}).
+{% endif %}</p>
+<p class="muted">آخرین خواندن آمار فروش: {{ p.synced_at | ago }}. این تخمین است، نه گزارش رسمی.</p>
+{% elif p.state == "nothing_usable" %}
+<p class="sub">تخمینی ساخته نشد: برای محصول‌های فروخته‌شده قیمت خرید یا کمیسیون ثبت نشده ({{ (p.excluded_missing + p.excluded_multi) | fa }} محصول).</p>
+{% else %}
+<p class="sub">آمار فروش هنوز خوانده نشده؛ تخمینی وجود ندارد. «۲ب» را بزنید.</p>
+{% endif %}
