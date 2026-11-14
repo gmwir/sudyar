@@ -1,12 +1,16 @@
 {% if y.state == "ok" %}
 <p class="big {% if y.total_toman < 0 %}c-danger{% else %}c-success{% endif %}">{{ y.total_toman | toman }}</p>
 <p class="sub">سود واقعی دیروز، از فروش ثبت‌شده‌ی دیجی‌کالا: {{ y.units | fa }} عدد (مرجوعی کم شده) در {{ y.variants_used | fa }} تنوع.
-{% if y.excluded %}{{ y.excluded | fa }} تنوع بدون قیمت خرید یا کمیسیون کنار گذاشته شد؛ عدد واقعاً کمتر یا بیشتر است.{% endif %}</p>
+{% if y.excluded %}{{ y.excluded | fa }} تنوع بدون قیمت خرید یا کمیسیون کنار گذاشته شد؛ عدد واقعاً کمتر یا بیشتر است.{% endif %}
+{% if y.unknown %}{{ y.unknown | fa }} تنوع نامشخص (شناسه دقیقاً یک‌بار تطبیق نخورد) در سود حساب نشد.{% endif %}</p>
+{% if y.rejected %}<p class="notice warning" role="alert">{{ y.rejected | fa }} خط نامعتبر؛ سود دیروز ممکن است دقیق نباشد (روز ناقص است).</p>{% endif %}
+{% if y.suspect_duplicates %}<p class="notice warning" role="alert">{{ y.suspect_duplicates | fa }} خط احتمالاً تکراری (دیجی‌کالا شناسه‌ی قلم نداده)؛ حذف نشد، سود دیروز ممکن است دقیق نباشد.</p>{% endif %}
 <p class="muted">آخرین خواندن سفارش‌ها: {{ y.synced_at | ago }}. {{ y.assumptions }}</p>
 {% else %}
 <p class="big unknown">{{ unknown }}</p>
 {% if y.state == "no_sales" %}<p class="sub">برای دیروز فروشی ثبت نشده است.</p>
-{% elif y.state == "nothing_usable" %}<p class="sub">فروش دیروز خوانده شد، ولی برای هیچ تنوعی قیمت خرید و کمیسیون هم‌زمان ثبت نیست ({{ y.excluded | fa }} تنوع).</p>
+{% elif y.state == "nothing_usable" %}<p class="sub">فروش دیروز خوانده شد، ولی برای هیچ تنوعی قیمت خرید و کمیسیون هم‌زمان ثبت نیست ({{ y.excluded | fa }} تنوع{% if y.unknown %}، {{ y.unknown | fa }} نامشخص{% endif %}).</p>
+{% if y.rejected %}<p class="notice warning" role="alert">{{ y.rejected | fa }} خط نامعتبر؛ سود دیروز ممکن است دقیق نباشد.</p>{% endif %}
 {% elif y.state == "no_scope" %}<p class="sub">دسترسی «order» به توکن داده نشده؛ سود واقعی دیروز ساخته نمی‌شود. تخمین زیر جایگزین است.</p>
 {% elif y.state == "expired" %}<p class="sub">توکن منقضی است؛ سود واقعی دیروز خوانده نمی‌شود.</p>
 {% else %}<p class="sub">فروش دیروز هنوز خوانده نشده؛ دستور orders-sync را اجرا کنید. تخمین زیر جایگزین است.</p>{% endif %}

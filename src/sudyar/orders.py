@@ -48,7 +48,8 @@ class DaySync:
     pages: int = 0
     canceled_dropped: int = 0
     duplicates_dropped: int = 0
-    rejected: int = 0  # lines with missing/invalid fields
+    rejected: int = 0  # lines with missing/invalid fields: the day is then INCOMPLETE
+    suspect_duplicates: int = 0  # identical lines without an item id: kept (never dropped silently), only warned
 
 
 @dataclass
@@ -123,8 +124,18 @@ def parse_order_line(raw: dict[str, Any], order_type: str, s: Settings) -> tuple
     return tehran_date(created), str(pvid), (-qty if order_type == "returned" else qty), price
 
 
-def _dedupe_key(raw: dict[str, Any], order_type: str) -> str | None:
-    """In-memory only (never stored): identical lines repeated by shifting pages are dropped."""
+ITEM_ID_KEYS = ("order_item_id", "item_id", "order_line_id")  # per-item id, if the API gives one (UNVERIFIED names)
+
+
+def _item_id(raw: dict[str, Any]) -> str | None:
+    for k in ITEM_ID_KEYS:
+        if raw.get(k) not in (None, ""):
+            return str(raw[k])
+    return None
+
+
+def _content_key(raw: dict[str, Any], order_type: str) -> str | None:
+    """In-memory only (never stored). Same order/shipment/variant/qty/price/total = a POSSIBLE duplicate."""
     if raw.get("order_id") in (None, "") or raw.get("shipment_id") in (None, ""):
         return None
     base = "|".join(str(raw.get(k)) for k in ("order_id", "shipment_id", "product_variant_id", "quantity",
@@ -141,10 +152,18 @@ def orders_synced_at(session: Session, day: date) -> datetime | None:
     return aware(m.fetched_at) if m else None
 
 
+def orders_quality(session: Session, day: date) -> dict[str, int]:
+    """{'rejected': n, 'suspect_duplicates': n} saved with the day (0 if none / older marker)."""
+    m = session.get(FeeCache, _marker(day))
+    d = m.data if m is not None and isinstance(m.data, dict) else {}
+    return {"rejected": int(d.get("rejected") or 0), "suspect_duplicates": int(d.get("suspect_duplicates") or 0)}
+
+
 async def _read_day(client, s: Settings, day: date, stats: DaySync) -> dict[tuple[str, int], int]:
     start, end = tehran_day_bounds(day)
     agg: dict[tuple[str, int], int] = {}
-    seen: set[str] = set()
+    seen_ids: set[str] = set()
+    seen_content: set[str] = set()
     for order_type in FETCH_TYPES:
         page = 0
         while True:
@@ -155,12 +174,19 @@ async def _read_day(client, s: Settings, day: date, stats: DaySync) -> dict[tupl
             stats.pages += 1
             for raw in items:
                 stats.items += 1
-                key = _dedupe_key(raw, order_type)
-                if key is not None:
-                    if key in seen:
+                item_id = _item_id(raw)
+                if item_id is not None:  # exact: the same item id twice is the same line (pages shifted)
+                    k = f"{order_type}|{item_id}"
+                    if k in seen_ids:
                         stats.duplicates_dropped += 1
                         continue
-                    seen.add(key)
+                    seen_ids.add(k)
+                else:  # no item id: identical-looking lines may be two real items. Keep both, warn.
+                    ck = _content_key(raw, order_type)
+                    if ck is not None:
+                        if ck in seen_content:
+                            stats.suspect_duplicates += 1
+                        seen_content.add(ck)
                 parsed = parse_order_line(raw, order_type, s)
                 if parsed is None:
                     stats.canceled_dropped += 1
@@ -195,7 +221,8 @@ async def sync_orders(client, session: Session, s: Settings, days: list[date], n
             if qty != 0:
                 session.add(DailySales(day=day, product_variant_id=pvid, unit_sale_price=price, quantity=qty, synced_at=now))
                 stats.lines += 1
-        data = {"lines": stats.lines, "items": stats.items, "pages": stats.pages}
+        data = {"lines": stats.lines, "items": stats.items, "pages": stats.pages, "rejected": stats.rejected,
+                "suspect_duplicates": stats.suspect_duplicates}
         m = session.get(FeeCache, _marker(day))
         if m is None:
             session.add(FeeCache(key=_marker(day), data=data, fetched_at=now))
@@ -203,7 +230,9 @@ async def sync_orders(client, session: Session, s: Settings, days: list[date], n
             m.data, m.fetched_at = data, now
         session.commit()
         if stats.rejected:
-            log.warning("orders %s: %d lines rejected (missing/invalid fields)", day, stats.rejected)
+            log.warning("orders %s: %d lines rejected (missing/invalid fields): day is INCOMPLETE", day, stats.rejected)
+        if stats.suspect_duplicates:
+            log.warning("orders %s: %d possible duplicate lines kept (no item id)", day, stats.suspect_duplicates)
         result.days.append(stats)
     return result
 

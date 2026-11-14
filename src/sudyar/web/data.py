@@ -16,7 +16,7 @@ from ..fees import LIMIT_MESSAGE_FA, ORPHAN_MESSAGE_FA, FeeProvider
 from ..floor import (COMPONENTS, OK, FloorEngine, FloorResult, resolve_components, resolve_setting, to_toman)
 from ..models import (ApiCallLog, DailySales, ProductSales, RadarEvent, Variant, VariantCost, VariantSnapshot)
 from ..notifier import CAUSE_FA
-from ..orders import ASSUMPTIONS_FA, orders_synced_at, yesterday_tehran
+from ..orders import ASSUMPTIONS_FA, orders_quality, orders_synced_at, yesterday_tehran
 from ..radar import BUYBOX_LOST, determine_cause
 from ..sales import sales_synced_at
 from ..tiers import CALM, HOT, TIERS, WARM, aware, classify_tiers, last_snapshot_times
@@ -399,7 +399,10 @@ class YesterdayView:
     total_toman: float | None = None
     units: int = 0  # net units (returns subtracted) that went into the total
     variants_used: int = 0
-    excluded: int = 0  # variants left out: cost/commission unknown, or variant unknown
+    excluded: int = 0  # variants left out: cost/commission unknown
+    unknown: int = 0  # variants left out: id not matched exactly once on the verified id space ("نامشخص")
+    rejected: int = 0  # invalid order lines of that day: the day is INCOMPLETE
+    suspect_duplicates: int = 0  # identical lines kept without an item id
     synced_at: datetime | None = None
     assumptions: str = ASSUMPTIONS_FA
 
@@ -422,20 +425,24 @@ def build_yesterday(session: Session, engine: FloorEngine, s: Settings, now: dat
     synced = orders_synced_at(session, day)
     if synced is None:
         return YesterdayView(problem or "no_data", day)
+    q = orders_quality(session, day)
     rows = list(session.scalars(select(DailySales).where(DailySales.day == day)))
     if not rows:
-        return YesterdayView("no_sales", day, synced_at=synced)
+        return YesterdayView("no_sales", day, synced_at=synced, rejected=q["rejected"],
+                             suspect_duplicates=q["suspect_duplicates"])
     engine.fees.preload(session)
-    total, units, used, excluded = 0.0, 0, 0, 0
+    total, units, used, excluded, unknown = 0.0, 0, 0, 0, 0
     by_variant: dict[str, list[DailySales]] = {}
     for r in rows:
         by_variant.setdefault(r.product_variant_id, []).append(r)
     for pvid, lines in by_variant.items():
-        variant = (session.scalar(select(Variant).where(Variant.product_variant_id == pvid).limit(1))
-                   or session.scalar(select(Variant).where(Variant.digikala_variant_id == pvid)))
-        if variant is None:
-            excluded += 1
+        # ONLY the verified id space (Variant.product_variant_id <-> order line product_variant_id), exactly one match.
+        # A match through the other id (digikala_variant_id) or several matches is ambiguous: no cost is applied.
+        matches = list(session.scalars(select(Variant).where(Variant.product_variant_id == pvid).limit(2)))
+        if len(matches) != 1:
+            unknown += 1
             continue
+        variant = matches[0]
         part, part_units, ok = 0.0, 0, True
         for ln in lines:
             price = to_toman(ln.unit_sale_price, s.orders_price_unit)
@@ -455,8 +462,9 @@ def build_yesterday(session: Session, engine: FloorEngine, s: Settings, now: dat
         units += part_units
         used += 1
     if not used:
-        return YesterdayView("nothing_usable", day, excluded=excluded, synced_at=synced)
-    return YesterdayView("ok", day, total, units, used, excluded, synced)
+        return YesterdayView("nothing_usable", day, excluded=excluded, unknown=unknown, rejected=q["rejected"],
+                             suspect_duplicates=q["suspect_duplicates"], synced_at=synced)
+    return YesterdayView("ok", day, total, units, used, excluded, unknown, q["rejected"], q["suspect_duplicates"], synced)
 
 
 # ---------------------------------------------------------------- profit card (7-day ESTIMATE, fallback)

@@ -38,6 +38,58 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 
 
+class _TooBig(Exception):
+    pass
+
+
+class UploadBodyLimit:
+    """Pure ASGI guard for POST /costs/upload: refuses an oversized body BEFORE it is parsed or buffered.
+
+    Checks Content-Length first, then counts streamed bytes and stops reading as soon as the limit is passed.
+    """
+
+    def __init__(self, app, path: str, limit: int):
+        self.app, self.path, self.limit = app, path, limit
+
+    async def _reject(self, send, status: int = 413):
+        body = "حجم فایل بیش از حد مجاز است.".encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"text/plain; charset=utf-8"), (b"content-length", str(len(body)).encode()),
+                                (b"connection", b"close")]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != self.path:
+            return await self.app(scope, receive, send)
+        cl = dict(scope["headers"]).get(b"content-length")
+        if cl is not None:
+            if not cl.isdigit():
+                return await self._reject(send, 400)
+            if int(cl) > self.limit:
+                return await self._reject(send)
+        seen, started = 0, False
+
+        async def limited():
+            nonlocal seen
+            msg = await receive()
+            if msg["type"] == "http.request":
+                seen += len(msg.get("body", b""))
+                if seen > self.limit:
+                    raise _TooBig()
+            return msg
+
+        async def guarded(msg):
+            nonlocal started
+            started = started or msg["type"] == "http.response.start"
+            await send(msg)
+
+        try:
+            await self.app(scope, limited, guarded)
+        except _TooBig:
+            if not started:
+                await self._reject(send)
+
+
 class LoginRequired(Exception):
     pass
 
@@ -83,6 +135,7 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
     app = FastAPI(title="Sudyar", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.session_factory, app.state.gate = settings, session_factory, gate
     app.state.cache, app.state.now_fn = cache, now_fn
+    app.add_middleware(UploadBodyLimit, path="/costs/upload", limit=MAX_UPLOAD_BYTES + 65_536)  # + multipart framing
     app.add_middleware(SessionMiddleware, secret_key=secret_key or _secrets.token_urlsafe(48),
                        session_cookie="sudyar_session", max_age=30 * 24 * 3600, same_site="strict",
                        https_only=https_only_cookie)

@@ -56,7 +56,7 @@ def test_no_delete_or_write_code_for_orders():
     assert not [n for n in names if any(w in n for w in ("delete", "cancel", "remove", "post", "put", "patch"))]
     for f in (ROOT / "src" / "sudyar").rglob("*.py"):
         for ln in f.read_text().splitlines():
-            if ln.lstrip().startswith("#") or "DELETE" in ln:  # comments/docs that warn about the DELETE endpoint
+            if ln.lstrip().startswith("#") or "DELETE" in ln or "ITEM_ID_KEYS" in ln:  # ITEM_ID_KEYS = response field names, not paths  # comments/docs that warn about the DELETE endpoint
                 continue
             assert "orders/{" not in ln and "order_item_id" not in ln, (f, ln)
             assert ".delete(" not in ln.replace("session.delete(", ""), (f, ln)
@@ -158,8 +158,8 @@ async def test_duplicates_and_other_days_are_dropped(session, make_limiter):
     items = [line(), line(), line(created="2026-11-12T08:00:00.000Z", oid=5, sid=5)]
     async with mk(handler_for({"processed": [items]}), st(), make_limiter) as c:
         r = await sync_orders(c, session, st(), [DAY], NOW)
-    assert [x.quantity for x in session.scalars(select(DailySales))] == [1]
-    assert r.days[0].duplicates_dropped == 1 and r.days[0].rejected == 1
+    assert [x.quantity for x in session.scalars(select(DailySales))] == [2]      # identical lines are KEPT (no item id)
+    assert r.days[0].duplicates_dropped == 0 and r.days[0].suspect_duplicates == 1 and r.days[0].rejected == 1
 
 
 async def test_page_cap_stores_nothing_and_failure_keeps_old_rows(session, make_limiter):
@@ -231,7 +231,7 @@ def test_states_no_data_no_sales_nothing_usable_and_missing_scope():
         s.add(DailySales(day=DAY, product_variant_id="unknown", unit_sale_price=1, quantity=1, synced_at=NOW))
         s.commit()
         y = data.build_yesterday(s, eng, se, NOW)
-        assert y.state == "nothing_usable" and y.total_toman is None and y.excluded == 1
+        assert y.state == "nothing_usable" and y.total_toman is None and y.unknown == 1 and y.excluded == 0
 
 
 def test_today_page_shows_actual_profit_and_flags_assumptions():

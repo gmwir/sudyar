@@ -346,3 +346,182 @@ def test_file_preview_without_high_values_has_no_extra_confirm(env):
     assert "خیلی بالاست" not in page and 'name="confirm_high"' not in page
     token = re.search(r'name="token" value="([^"]+)"', page).group(1)
     assert c.post("/costs/apply", data={"csrf_token": t, "token": token}, follow_redirects=False).status_code == 303
+
+
+# ================= review fixes (Part 4b/4c) =================
+from datetime import date
+
+from sudyar.config import Settings
+from sudyar.cost_import import parse_cost
+from sudyar.models import DailySales, FeeCache
+from sudyar.orders import sync_orders
+from sudyar.web import data as web_data
+
+
+# ---- 1) decimal separators never vanish
+@pytest.mark.parametrize("raw", ["12٫5", "12/5", "۱۲٫۵", "1٫500٫000", "1/200/000", "0٫5"])
+def test_parse_cost_never_turns_decimal_into_bigger_number(raw):
+    with pytest.raises(ValueError):
+        parse_cost(raw)
+
+
+def test_parse_cost_still_accepts_normal_values():
+    assert parse_cost("12٫0") == 12 and parse_cost("۱٬۲۰۰٬۰۰۰") == 1_200_000 and parse_cost("1,200,000") == 1_200_000
+
+
+def test_web_rejects_decimal_separator_with_persian_reason(env):
+    f, c, t = env
+    r = c.post("/costs/1002", data={"cost": "12٫5"}, headers={"hx-request": "true", "x-csrf-token": t})
+    assert "عدد صحیح" in r.text and "1002" not in costs(f)
+    page = c.post("/costs/upload", files=csv_file("variant_id,buy_cost\n1002,12٫5\n"), data={"csrf_token": t}).text
+    assert "عدد صحیح" in page and audit(f) == []
+
+
+# ---- 2) ambiguous variant match is never costed
+def _day_with(f, pvid, qty=1, price=15_000_000):
+    day = date(2026, 11, 13)
+    with f() as s:
+        s.add(DailySales(day=day, product_variant_id=pvid, unit_sale_price=price, quantity=qty, synced_at=NOW))
+        s.add(FeeCache(key=f"orders:{day}", data={}, fetched_at=NOW))
+        s.commit()
+
+
+def _yesterday(f):
+    with f() as s:
+        return web_data.build_yesterday(s, web_data.make_engine(make_settings()), make_settings(), NOW)
+
+
+def make_settings(**kw):
+    from webfx import make_settings as ms
+    return ms(**kw)
+
+
+def test_order_line_matched_only_through_fallback_id_is_unknown():
+    f = make_factory()
+    seed(f)
+    _day_with(f, "1001")                   # "1001" is a digikala_variant_id, NOT a product_variant_id ("pv1001")
+    y = _yesterday(f)
+    assert y.state == "nothing_usable" and y.unknown == 1 and y.total_toman is None
+
+
+def test_order_line_matching_two_variants_is_unknown():
+    f = make_factory()
+    seed(f)
+    with f() as s:
+        v = s.scalar(select(Variant).where(Variant.digikala_variant_id == "1002"))
+        v.product_variant_id = "pv1001"    # now two variants share the id
+        s.commit()
+    _day_with(f, "pv1001")
+    y = _yesterday(f)
+    assert y.unknown == 1 and y.total_toman is None
+
+
+def test_exact_single_match_is_still_costed():
+    f = make_factory()
+    seed(f)
+    _day_with(f, "pv1001")
+    y = _yesterday(f)
+    assert y.state == "ok" and y.unknown == 0 and y.total_toman == pytest.approx(1_500_000 * 0.9 - 1_000_000)
+
+
+# ---- 3) rejected lines mark the day incomplete, and Today says so
+async def test_rejected_lines_mark_day_incomplete_and_show_on_today(session, make_limiter):
+    import httpx
+    from sudyar.digikala_client import DigikalaClient
+    from test_orders import line, mk, page, st
+
+    good, bad = line(oid=1, sid=1), line(oid=2, sid=2, qty="x")
+    def h(r):
+        return httpx.Response(200, json=page([good, bad] if r.url.params["order_type"] == "processed" else []))
+    async with mk(h, st(), make_limiter) as c:
+        await sync_orders(c, session, st(), [date(2026, 11, 13)], NOW)
+    q = session.get(FeeCache, "orders:2026-11-13").data
+    assert q["rejected"] == 1
+    # same data in the web database: the card must warn
+    f = make_factory()
+    seed(f)
+    _day_with(f, "pv1001")
+    with f() as s:
+        s.get(FeeCache, "orders:2026-11-13").data = {"rejected": 3}
+        s.commit()
+    r = client(make_app(f)).get("/partials/profit")
+    assert "۳ خط نامعتبر؛ سود دیروز ممکن است دقیق نباشد" in r.text
+
+
+# ---- 4) duplicates: item id => exact dedupe; no id => keep + warn
+async def test_item_id_dedupes_exactly_and_no_id_keeps_lines(session, make_limiter):
+    import httpx
+    from test_orders import line, mk, page, st
+
+    def run(items):
+        def h(r):
+            return httpx.Response(200, json=page(items if r.url.params["order_type"] == "processed" else []))
+        return h
+    a = line(oid=1, sid=1, order_item_id=11)
+    async with mk(run([a, dict(a), line(oid=1, sid=1, order_item_id=12)]), st(), make_limiter) as c:
+        r = await sync_orders(c, session, st(), [date(2026, 11, 13)], NOW, force=True)
+    assert r.days[0].duplicates_dropped == 1 and r.days[0].suspect_duplicates == 0
+    assert sum(x.quantity for x in session.scalars(select(DailySales))) == 2
+    async with mk(run([line(), line()]), st(), make_limiter) as c:                  # no item id at all
+        r = await sync_orders(c, session, st(), [date(2026, 11, 13)], NOW, force=True)
+    assert r.days[0].suspect_duplicates == 1 and r.days[0].duplicates_dropped == 0
+    assert sum(x.quantity for x in session.scalars(select(DailySales))) == 2        # kept, not merged away
+    assert session.get(FeeCache, "orders:2026-11-13").data["suspect_duplicates"] == 1
+
+
+# ---- 5) csv.Error and wide xlsx rows
+def test_huge_csv_field_is_a_persian_rejection_not_500(env):
+    f, c, t = env
+    big = "variant_id,buy_cost\n1002," + "9" * 200_000 + "\n"
+    r = c.post("/costs/upload", files=csv_file(big), data={"csrf_token": t})
+    assert r.status_code == 422 and "فایل CSV خوانده نشد" in r.text and audit(f) == []
+
+
+def test_wide_xlsx_rows_are_bounded(tmp_path):
+    from sudyar.cost_import import MAX_COLUMNS, read_table
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["variant_id", "buy_cost"] + [f"x{i}" for i in range(5000)])
+    ws.append(["1002", 5] + [1] * 5000)
+    p = tmp_path / "w.xlsx"
+    wb.save(p)
+    rows = read_table(p, max_rows=10)
+    assert len(rows) == 1 and len(rows[0][1]) <= MAX_COLUMNS and rows[0][1]["buy_cost"] == 5
+
+
+# ---- 6) oversized body refused before parsing
+def test_content_length_over_limit_rejected_before_parsing(env, monkeypatch):
+    f, c, t = env
+    called = []
+    monkeypatch.setattr(cost_page, "make_preview", lambda *a, **k: called.append(1))
+    r = c.post("/costs/upload", content=b"x", headers={"content-length": "5000000", "content-type": "multipart/form-data; boundary=b"})
+    assert r.status_code in (413, 400) or r.status_code == 413
+    assert called == [] and audit(f) == []
+
+
+def test_streamed_body_over_limit_is_cut_off():
+    import asyncio
+    from sudyar.web.app import UploadBodyLimit
+    sent, reads = [], []
+
+    async def inner(scope, receive, send):
+        while True:
+            m = await receive()
+            reads.append(len(m.get("body", b"")))
+            if not m.get("more_body"):
+                break
+
+    async def run():
+        chunks = [{"type": "http.request", "body": b"x" * 400, "more_body": True} for _ in range(100)]
+
+        async def receive():
+            return chunks.pop(0)
+
+        async def send(m):
+            sent.append(m)
+
+        scope = {"type": "http", "method": "POST", "path": "/costs/upload", "headers": []}
+        await UploadBodyLimit(inner, "/costs/upload", 1000)(scope, receive, send)
+
+    asyncio.run(run())
+    assert sent[0]["status"] == 413 and len(reads) <= 3          # stopped reading right after the limit

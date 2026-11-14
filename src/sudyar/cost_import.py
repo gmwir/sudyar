@@ -22,6 +22,7 @@ from .models import Variant, VariantCost, utcnow
 
 MAX_UPLOAD_BYTES = 2_000_000  # web upload limit
 MAX_UPLOAD_ROWS = 5000        # web upload limit
+MAX_COLUMNS = 50              # only the first columns are ever read; wider rows are cut, never loaded in full
 _MAX_UNZIPPED = 50_000_000    # xlsx is a zip: refuse zip bombs
 
 
@@ -55,8 +56,11 @@ def parse_cost(value: Any) -> int:
         num = float(value)
     else:
         txt = str(value).translate(_DIGITS)
-        for ch in (",", "٬", " ", " ", "٫"):
+        for ch in (",", "\u066c", " ", "\u00a0", "\u202f"):  # thousands separators / spaces (U+066C Arabic thousands)
             txt = txt.replace(ch, "")
+        # U+066B (Persian decimal separator) and "/" are DECIMAL points: "12٫5" is 12.5 (then refused as not whole),
+        # never 125; "1/200/000" is not a number at all.
+        txt = txt.replace("\u066b", ".").replace("/", ".")
         try:
             num = float(txt)
         except ValueError:
@@ -97,7 +101,10 @@ def read_table(path: Path, max_rows: int | None = None) -> list[tuple[int, dict[
             dialect = csv.Sniffer().sniff(text[:2048], delimiters=",;\t")
         except csv.Error:
             dialect = csv.excel
-        rows = list(csv.reader(text.splitlines(), dialect))
+        try:
+            rows = [r[:MAX_COLUMNS] for r in csv.reader(text.splitlines(), dialect)]
+        except csv.Error:
+            raise CostImportError("The CSV file could not be parsed (a field is huge or the format is broken).") from None
     elif suffix == ".xlsx":
         import zipfile
 
@@ -113,7 +120,7 @@ def read_table(path: Path, max_rows: int | None = None) -> list[tuple[int, dict[
             wb = load_workbook(path, read_only=True, data_only=True)
             try:
                 rows = []
-                for r in wb.worksheets[0].iter_rows(values_only=True):
+                for r in wb.worksheets[0].iter_rows(values_only=True, max_col=MAX_COLUMNS):
                     rows.append(list(r))
                     if max_rows is not None and len(rows) > max_rows + 1:
                         break

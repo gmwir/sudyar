@@ -363,6 +363,10 @@ def orders_sync_cmd(args: list[str]) -> int:
         else:
             print(f"{d.day}: {d.lines} sale lines saved ({d.items} order lines, {d.pages} pages, "
                   f"{d.canceled_dropped} canceled dropped, {d.duplicates_dropped} duplicates, {d.rejected} rejected)")
+            if d.rejected:
+                print(f"  WARNING {d.day}: {d.rejected} invalid lines; this day is INCOMPLETE")
+            if d.suspect_duplicates:
+                print(f"  WARNING {d.day}: {d.suspect_duplicates} possible duplicate lines kept (the API gave no item id)")
     return 0
 
 
