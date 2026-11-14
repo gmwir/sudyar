@@ -301,9 +301,16 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
 
     @app.post("/costs/apply", dependencies=[Depends(require_auth)], include_in_schema=False)
     def costs_apply(request: Request, session: Session = Depends(get_session), token: str = Form(""),
+                    confirm_high: str = Form(""),
                     csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
         verify_csrf(request, csrf_token_f, x_csrf_token)
-        entries = previews.take(request.session.get("csrf", ""), token)
+        owner = request.session.get("csrf", "")
+        pending = previews.peek(owner, token)
+        if pending is not None and cost_page.high_variant_ids(session, settings, pending) and confirm_high != "1":
+            return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
+                          notice=(False, "برای عددهای خیلی بالا باید تیک «مطمئنم تومان است» را هم بزنید؛ پیش‌نمایش را دوباره بارگذاری کنید."),
+                          **costs_ctx(session))  # token kept: nothing consumed, nothing written
+        entries = previews.take(owner, token)
         if entries is None:
             return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
                           notice=(False, "پیش‌نمایش منقضی شده؛ فایل را دوباره بارگذاری کنید."), **costs_ctx(session))
@@ -313,14 +320,19 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
         return RedirectResponse(f"/costs?saved={changed}", status_code=303)
 
     def cost_row_response(request: Request, session: Session, variant: Variant, status_code: int = 200,
-                          error: str | None = None, ok: str | None = None):
+                          error: str | None = None, ok: str | None = None, warn: str | None = None,
+                          entered: str | None = None):
         row = cost_page.cost_row(session, variant)
         if not is_htmx(request):
+            if warn:
+                return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
+                              notice=(False, f"{variant.title or variant.digikala_variant_id}: {warn} همین عدد را دوباره با تیک تأیید بفرستید."),
+                              **costs_ctx(session, variant.title or ""))
             if error:
                 return render(request, "costs.html", "costs", 422, title="قیمت خرید", preview=None,
                               notice=(False, error), **costs_ctx(session, variant.title or ""))
             return RedirectResponse("/costs", status_code=303)
-        resp = render(request, "_cost_row.html", row=row, error=error, ok=ok)
+        resp = render(request, "_cost_row.html", row=row, error=error, ok=ok, warn=warn, entered=entered)
         resp.headers["HX-Trigger"] = "costs-changed"  # the "last 20 changes" box reloads itself
         return resp
 
@@ -332,12 +344,15 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
 
     @app.post("/costs/{variant_id}", dependencies=[Depends(require_auth)], include_in_schema=False)
     def cost_save(request: Request, variant_id: str, session: Session = Depends(get_session), cost: str = Form(""),
+                  confirm_high: str = Form(""),
                   csrf_token_f: str = Form("", alias="csrf_token"), x_csrf_token: str | None = Header(None)):
         verify_csrf(request, csrf_token_f, x_csrf_token)
         v = variant_or_404(session, variant_id)
         value, err = cost_page.manual_cost_error_fa(cost)
         if err:
             return cost_row_response(request, session, v, error=err)
+        if cost_page.is_high(value, v, settings) and confirm_high != "1":
+            return cost_row_response(request, session, v, warn=cost_page.HIGH_WARNING_FA, entered=str(value))  # not saved yet
         changed = set_cost(session, v, value, "manual", now_fn())
         session.commit()
         cache.clear()

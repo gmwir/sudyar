@@ -20,6 +20,7 @@ from ..config import Settings
 from ..cost_import import (MAX_UPLOAD_BYTES, MAX_UPLOAD_ROWS, CostImportError, PlanEntry, build_plan, parse_cost,
                            read_table)
 from ..costs import last_changes
+from ..floor import to_toman
 from ..models import CostAudit, Variant, VariantCost
 
 PAGE_SIZE = 50
@@ -78,6 +79,22 @@ def file_error_fa(msg: str) -> str:
         if key in msg:
             return fa
     return "فایل خوانده نشد."
+
+
+HIGH_FACTOR = 3
+HIGH_WARNING_FA = "این عدد خیلی بالاست؛ مطمئنید تومان است؟"
+
+
+def is_high(cost: int | None, variant: Variant | None, settings: Settings) -> bool:
+    """Sanity check only (never a block): cost > 3x the variant's current selling price, when that price is known."""
+    if cost is None or variant is None or variant.price_sale is None:
+        return False
+    price = to_toman(variant.price_sale, settings.price_unit)
+    return price is not None and price > 0 and cost > HIGH_FACTOR * price
+
+
+def high_variant_ids(session: Session, settings: Settings, entries: list[PlanEntry]) -> set[int]:
+    return {e.variant_id for e in entries if is_high(e.new, session.get(Variant, e.variant_id), settings)}
 
 
 def manual_cost_error_fa(raw: str) -> tuple[int | None, str | None]:
@@ -146,6 +163,10 @@ def build_costs(session: Session, q: str, page: int) -> CostsView:
 class Preview:
     entries: list[PlanEntry]
     rejected: list[tuple[int, str]]  # Persian reasons
+    high_ids: set[int] = field(default_factory=set)  # variants whose new cost is > 3x the selling price
+
+    @property
+    def high(self): return [e for e in self.entries if e.variant_id in self.high_ids and e.kind != "unchanged"]
 
     @property
     def created(self): return [e for e in self.entries if e.kind == "created"]
@@ -172,7 +193,7 @@ def make_preview(session: Session, settings: Settings, filename: str, content: b
         path.write_bytes(content)
         rows = read_table(path, max_rows=MAX_UPLOAD_ROWS)
     entries, rejected = build_plan(session, settings, rows)
-    return Preview(entries, [(n, reason_fa(r)) for n, r in rejected])
+    return Preview(entries, [(n, reason_fa(r)) for n, r in rejected], high_variant_ids(session, settings, entries))
 
 
 class PreviewStore:
@@ -191,6 +212,12 @@ class PreviewStore:
                 self._items.pop(next(iter(self._items)))
             self._items[token] = (owner, self._clock() + PREVIEW_TTL, entries)
         return token
+
+    def peek(self, owner: str, token: str) -> list[PlanEntry] | None:
+        with self._lock:
+            self._purge()
+            item = self._items.get(token)
+            return item[2] if item is not None and secrets.compare_digest(item[0], owner) else None
 
     def take(self, owner: str, token: str) -> list[PlanEntry] | None:
         with self._lock:

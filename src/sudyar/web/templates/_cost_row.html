@@ -5,10 +5,11 @@
     <form method="post" action="/costs/{{ row.variant.digikala_variant_id }}" class="costform"
           hx-post="/costs/{{ row.variant.digikala_variant_id }}" hx-target="#cost-{{ row.variant.digikala_variant_id }}" hx-swap="outerHTML">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="sr" for="c-{{ row.variant.digikala_variant_id }}">قیمت خرید (تومان)</label>
       <input type="text" id="c-{{ row.variant.digikala_variant_id }}" name="cost" inputmode="numeric" dir="ltr" autocomplete="off"
-             placeholder="تومان" value="{{ row.cost if row.cost else '' }}">
-      <button class="btn secondary sm" type="submit">ذخیره</button>
+             aria-label="قیمت خرید به تومان" value="{{ entered if entered else (row.cost if row.cost else '') }}">
+      <label class="unit" for="c-{{ row.variant.digikala_variant_id }}">به تومان</label>
+      {% if warn %}<input type="hidden" name="confirm_high" value="1">{% endif %}
+      <button class="btn secondary sm" type="submit">{% if warn %}بله، تومان است؛ ذخیره کن{% else %}ذخیره{% endif %}</button>
     </form>
     {% if row.cost %}
     <form method="post" action="/costs/{{ row.variant.digikala_variant_id }}/clear" hx-post="/costs/{{ row.variant.digikala_variant_id }}/clear"
@@ -18,6 +19,7 @@
     </form>
     {% endif %}
     <p class="sub">{% if row.cost %}{{ row.cost | toman }} · {{ row.updated_at | ago }}{% else %}قیمت خرید ثبت نشده{% endif %}</p>
+    {% if warn %}<p class="sub c-warning" role="alert">{{ warn }}</p>{% endif %}
     {% if error %}<p class="sub c-danger" role="alert">{{ error }}</p>{% elif ok %}<p class="sub c-success" role="status">{{ ok }}</p>{% endif %}
   </td>
 </tr>

@@ -287,3 +287,62 @@ def test_cli_import_shares_parser_and_audits(tmp_path):
         assert (r.created, r.updated, r.unchanged) == (1, 0, 1) and s.scalar(select(CostAudit.id)) is None
         import_costs(s, p, Settings())
     assert audit(f) == [("1002", None, 777, "file")]
+
+
+# ---------- Part 4b fix: "به تومان" label + 3x sanity warning (warn, never block) ----------
+def test_toman_label_on_every_input_and_upload_help(env):
+    _, c, _ = env
+    t = c.get("/costs").text
+    assert t.count('class="unit"') == t.count('name="cost"') >= 3 and "به تومان" in t
+    assert "<b>به تومان</b> بنویسید" in t
+
+
+def test_inline_high_cost_needs_one_extra_confirm(env):
+    f, c, t = env
+    # v1002 sells at 8,900,000 Rial = 890,000 Toman; 3x = 2,670,000
+    ok = c.post("/costs/1002", data={"csrf_token": t, "cost": "2670000"}, follow_redirects=False)
+    assert ok.status_code == 303 and costs(f)["1002"] == 2_670_000          # exactly 3x: no warning
+    c.post("/costs/1002/clear", data={"csrf_token": t})
+    h = {"hx-request": "true", "x-csrf-token": t}
+    r = c.post("/costs/1002", data={"cost": "8900000"}, headers=h)
+    assert "این عدد خیلی بالاست؛ مطمئنید تومان است؟" in r.text and 'name="confirm_high"' in r.text
+    assert "1002" not in costs(f)                                           # warned, not saved
+    r2 = c.post("/costs/1002", data={"cost": "8900000", "confirm_high": "1"}, headers=h)
+    assert "ذخیره شد" in r2.text and costs(f)["1002"] == 8_900_000
+    assert audit(f)[-1] == ("1002", None, 8_900_000, "manual")
+
+
+def test_inline_warning_without_htmx_does_not_save(env):
+    f, c, t = env
+    r = c.post("/costs/1002", data={"csrf_token": t, "cost": "99999999"})
+    assert r.status_code == 422 and "این عدد خیلی بالاست" in r.text and "1002" not in costs(f)
+
+
+def test_no_warning_when_price_unknown():
+    f = make_factory()
+    seed(f)
+    with f() as s:
+        s.get(Variant, s.scalar(select(Variant.id).where(Variant.digikala_variant_id == "1002"))).price_sale = None
+        s.commit()
+    c = client(make_app(f))
+    t = tok(c.get("/costs").text)
+    assert c.post("/costs/1002", data={"csrf_token": t, "cost": "999999999"}, follow_redirects=False).status_code == 303
+
+
+def test_file_preview_warns_and_apply_needs_extra_confirm(env):
+    f, c, t = env
+    page = c.post("/costs/upload", files=csv_file("variant_id,buy_cost\n1002,8900000\n1001,500000\n"), data={"csrf_token": t}).text
+    assert "این عددها خیلی بالاست؛ مطمئنید تومان است؟" in page and 'name="confirm_high"' in page and "required" in page
+    token = re.search(r'name="token" value="([^"]+)"', page).group(1)
+    r = c.post("/costs/apply", data={"csrf_token": t, "token": token})        # no extra confirm
+    assert r.status_code == 422 and costs(f) == BASE and audit(f) == []
+    r = c.post("/costs/apply", data={"csrf_token": t, "token": token, "confirm_high": "1"}, follow_redirects=False)
+    assert r.status_code == 303 and costs(f)["1002"] == 8_900_000 and costs(f)["1001"] == 500_000
+
+
+def test_file_preview_without_high_values_has_no_extra_confirm(env):
+    f, c, t = env
+    page = c.post("/costs/upload", files=csv_file("variant_id,buy_cost\n1002,100000\n"), data={"csrf_token": t}).text
+    assert "خیلی بالاست" not in page and 'name="confirm_high"' not in page
+    token = re.search(r'name="token" value="([^"]+)"', page).group(1)
+    assert c.post("/costs/apply", data={"csrf_token": t, "token": token}, follow_redirects=False).status_code == 303
