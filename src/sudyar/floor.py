@@ -82,6 +82,8 @@ NO_COMPONENTS = Components()
 
 
 # ---------- math (all in Toman) ----------
+MAX_FLOOR_TOMAN = 10**15  # any floor above this is absurd: refused, so it can never overflow the database integer
+
 def net_profit(price_toman: float, buy_cost_toman: float, commission_pct: float,
                comps: Components = NO_COMPONENTS) -> float:
     var = (commission_pct + comps.total_pct) / 100
@@ -104,6 +106,8 @@ def compute_floor(buy_cost_toman: float, commission_pct: float, comps: Component
     need = fixed / (1 - var - m)
     if min_profit_toman is not None:
         need = max(need, (fixed + min_profit_toman) / (1 - var))
+    if not math.isfinite(need) or need > MAX_FLOOR_TOMAN:
+        return None, "floor_too_large"
     return math.ceil(need - 1e-9), "computed"
 
 
@@ -133,7 +137,10 @@ def breakeven_floor(buy_cost_toman: float, commission_share: float) -> int | Non
     None if the share is invalid (not finite, negative, or >= 1: no price can cover the cost)."""
     if not math.isfinite(commission_share) or commission_share < 0 or commission_share >= 1:
         return None
-    return math.ceil(buy_cost_toman / (1 - commission_share) - 1e-9)
+    need = buy_cost_toman / (1 - commission_share)
+    if not math.isfinite(need) or need > MAX_FLOOR_TOMAN:
+        return None
+    return math.ceil(need - 1e-9)
 
 
 def variant_brand_id(session: Session, variant: Variant) -> str | None:
@@ -216,6 +223,13 @@ class FloorEngine:
         category = _field(variant.raw_json, self.s.floor_category_field)
         return await self.fees.get(session, category, variant_brand_id(session, variant), now, allow_fetch)
 
+    @staticmethod
+    def _finalize(effective: int, computed: int | None, reason: str, **base) -> FloorResult:
+        """The only way an ok floor is produced: refuses absurd values (never reaches the database)."""
+        if effective > MAX_FLOOR_TOMAN or (computed is not None and computed > MAX_FLOOR_TOMAN):
+            return FloorResult(IMPOSSIBLE, reason="floor_too_large", **base)
+        return FloorResult(OK, effective, computed, reason, **base)
+
     async def evaluate(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool = True) -> FloorResult:
         setting = resolve_setting(session, variant, self.s)
         if setting is None:
@@ -255,7 +269,7 @@ class FloorEngine:
                     category = _field(variant.raw_json, self.s.floor_category_field)
                     return FloorResult(NEEDS_FEES, reason=self.fees.miss_reason(session, category, now),
                                        scope=setting.scope)
-                return FloorResult(OK, manual_floor, None, "manual_floor_no_cost", setting.scope)
+                return self._finalize(manual_floor, None, "manual_floor_no_cost", scope=setting.scope)
             if unusable_manual_only:
                 return FloorResult(NO_FLOOR, reason="manual floor is not usable (zero/invalid, e.g. current price 0)",
                                    scope=setting.scope)
@@ -269,15 +283,20 @@ class FloorEngine:
         comps = resolve_components(session, variant, self.s)
         base = dict(scope=setting.scope, fee_reason=fees.reason, commission_pct=fees.commission_pct,
                     included_components=comps.included, unset_components=comps.unset)
-        breakeven = breakeven_floor(cost, fees.commission_pct / 100)
-        if breakeven is None:
+        share = fees.commission_pct / 100
+        if not (math.isfinite(share) and 0 <= share < 1):
             return FloorResult(IMPOSSIBLE, reason="commission share must be below 100%", **base)
+        # TRUE break-even: cost + commission + every configured cost component (tax, packaging, ...), i.e. exactly
+        # what margin floors use with a 0 margin and 0 minimum profit. A manual floor is never allowed below it.
+        breakeven, why = compute_floor(cost, fees.commission_pct, comps, 0, 0)
+        if breakeven is None:
+            return FloorResult(IMPOSSIBLE, reason=why, **base)
 
         if not has_margin_rule:
             if manual_floor is not None:
-                effective = max(manual_floor, breakeven)  # a manual floor can never lose money on commission + cost
+                effective = max(manual_floor, breakeven)  # a manual floor can never lose money
                 reason = "manual_floor" if effective == manual_floor else "manual_floor_raised_to_breakeven"
-                return FloorResult(OK, effective, None, reason, **base)
+                return self._finalize(effective, None, reason, **base)
             if unusable_manual_only:
                 return FloorResult(NO_FLOOR, reason="manual floor is not usable (zero/invalid, e.g. current price 0)", **base)
             return FloorResult(NO_RULE, reason="rule has no margin/min profit", **base)
@@ -287,7 +306,7 @@ class FloorEngine:
             return FloorResult(IMPOSSIBLE, reason=why, **base)
         effective = max(computed, manual_floor or 0, breakeven)
         reason = "computed" if effective == computed else "manual_floor_higher"
-        return FloorResult(OK, effective, computed, reason, **base)
+        return self._finalize(effective, computed, reason, **base)
 
     async def profit_now(self, session: Session, variant: Variant, now: datetime, allow_fetch: bool = False) -> float | None:
         """Net profit per unit at our current price, in Toman. None unless cost, commission and unit are known."""
