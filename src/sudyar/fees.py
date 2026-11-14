@@ -255,6 +255,7 @@ class FeeProvider:
         try:
             await sync_commissions(self.client, session, self.s, now)
             self._by_category = None
+            self._partial_cache = None
         except Exception as e:  # message type only: never headers/tokens/URLs
             self._last_failed = now
             session.rollback()

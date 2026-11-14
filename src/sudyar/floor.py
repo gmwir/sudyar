@@ -251,7 +251,7 @@ class FloorEngine:
                 # data fails closed (needs_fees), exactly like the "*" marker path.
                 if allow_fetch:
                     await self.fees.ensure_fresh(session, now)
-                if not self.fees.data_usable(session, now):
+                if self.fees.all_incomplete(session) or not self.fees.data_usable(session, now):
                     category = _field(variant.raw_json, self.s.floor_category_field)
                     return FloorResult(NEEDS_FEES, reason=self.fees.miss_reason(session, category, now),
                                        scope=setting.scope)
