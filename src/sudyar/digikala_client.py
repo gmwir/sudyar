@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .config import Settings
+from .config import PATH_FIELDS, Settings
 from .rate_limiter import ApiError, RateLimiter
 
 log = logging.getLogger(__name__)
@@ -69,6 +69,9 @@ class DigikalaClient:
         if not path.startswith("/") or path.startswith("//") or "://" in path:
             # an absolute URL here would send the Bearer token to another host
             raise ValueError("API path must start with a single '/' (no host)")
+        if path not in self.allowed_paths():
+            # only the read endpoints Sudyar is configured for; anything else is refused before any network call
+            raise ReadOnlyViolation(f"Blocked GET {path}: not one of the configured read endpoints.")
 
         async def send() -> httpx.Response:
             return await self._http.request("GET", path, params=params)
@@ -82,6 +85,10 @@ class DigikalaClient:
         if resp.status_code >= 400:
             raise ApiError(f"GET {path} failed with status {resp.status_code}")
         return resp.json()
+
+    def allowed_paths(self) -> frozenset[str]:
+        s = self.settings
+        return frozenset(v for v in (getattr(s, f, "") for f in PATH_FIELDS) if v)
 
     async def get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         return await self._request("GET", path, params)

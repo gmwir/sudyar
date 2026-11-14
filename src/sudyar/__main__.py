@@ -474,11 +474,16 @@ def web_cmd(args: list[str]) -> int:
         print("Invalid options: --port must be between 1 and 65535")
         return 2
     password = os.environ.get("WEB_PASSWORD") or None
+    https_only = os.environ.get("WEB_HTTPS_ONLY_COOKIE", "").lower() in ("1", "true", "yes")
+    proxies = tuple(p.strip() for p in os.environ.get("WEB_TRUSTED_PROXIES", "").split(",") if p.strip())
     s = load_settings()
+    if host not in ("127.0.0.1", "localhost", "::1") and not https_only:
+        print("WARNING: the web UI is reachable from other machines but the login cookie is not HTTPS-only. "
+              "On a server, put it behind HTTPS and set WEB_HTTPS_ONLY_COOKIE=1.")
     try:
         app = create_app(s, web_password=password, bind_host=host,
                          allow_container_bind=os.environ.get("WEB_ALLOW_CONTAINER_BIND", "").lower() in ("1", "true", "yes"),
-                         https_only_cookie=os.environ.get("WEB_HTTPS_ONLY_COOKIE", "").lower() in ("1", "true", "yes"),
+                         https_only_cookie=https_only, trusted_proxies=proxies,
                          secret_key=os.environ.get("WEB_SECRET_KEY") or None)
     except WebConfigError as e:
         print(str(e))

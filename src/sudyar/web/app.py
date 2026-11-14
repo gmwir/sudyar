@@ -90,6 +90,23 @@ class UploadBodyLimit:
                 await self._reject(send)
 
 
+def client_key(request: Request, trusted_proxies: tuple[str, ...] = ()) -> str:
+    """Who is logging in, for the wrong-password throttle.
+
+    Direct connection: the socket address. Behind a reverse proxy listed in WEB_TRUSTED_PROXIES: the
+    right-most X-Forwarded-For address that is not itself a trusted proxy (the left part can be forged).
+    X-Forwarded-For from anyone else is ignored.
+    """
+    peer = request.client.host if request.client else "?"
+    if peer not in trusted_proxies:
+        return peer
+    hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    for h in reversed(hops):
+        if h not in trusted_proxies:
+            return h[:64]
+    return peer
+
+
 class LoginRequired(Exception):
     pass
 
@@ -118,7 +135,8 @@ class RowCache:
 def create_app(settings: Settings | None = None, session_factory: sessionmaker[Session] | None = None, *,
                web_password: str | None = None, bind_host: str = "127.0.0.1", allow_container_bind: bool = False,
                now_fn: Callable[[], datetime] = utcnow, cache_seconds: float = 30.0,
-               secret_key: str | None = None, https_only_cookie: bool = False) -> FastAPI:
+               secret_key: str | None = None, https_only_cookie: bool = False,
+               trusted_proxies: tuple[str, ...] = ()) -> FastAPI:
     check_bind(bind_host, web_password, allow_container_bind)  # raises WebConfigError: refuse to start
     if settings is None:
         from ..config import load_settings
@@ -247,7 +265,7 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
         verify_csrf(request, csrf_token_f, x_csrf_token)
         if not gate.enabled:
             return RedirectResponse("/", status_code=303)
-        client = request.client.host if request.client else "?"
+        client = client_key(request, trusted_proxies)
         if throttle.blocked(client):
             raise HTTPException(status_code=429)
         if not gate.check(password):
