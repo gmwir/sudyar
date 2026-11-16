@@ -74,11 +74,16 @@ NUMERIC_RANGES: dict[str, tuple[float, float]] = {
     "fees_cache_seconds": (0, 30 * DAY), "fees_max_pages": (1, 10_000), "fees_max_drop_pct": (0, 100),
     "fees_max_stale_days": (0, 365), "sales_cache_seconds": (0, 30 * DAY), "sales_max_pages": (1, 1000),
     "orders_cache_seconds": (0, 30 * DAY), "orders_max_pages": (1, 1000), "orders_default_days": (1, 14),
+    "reprice_interval_seconds": (30, DAY), "reprice_max_change_pct": (0.1, 50), "reprice_max_changes_per_day": (1, 1000),
+    "reprice_cooldown_seconds": (0, DAY), "reprice_raise_step_pct": (0, 20), "reprice_round_rial": (1, 1_000_000),
+    "low_stock_threshold": (0, 100_000), "promo_order_limit": (1, 1000), "promo_price_limit": (1, 100_000),
 }
+WRITE_MODES = ("off", "dry_run", "live")
 ENV_NAMES = {"orders_path": "ORDERS_PATH", "orders_price_unit": "ORDERS_PRICE_UNIT",
              "orders_discount_mode": "ORDERS_DISCOUNT_MODE", "base_url": "DIGIKALA_BASE_URL", "variants_path": "DIGIKALA_VARIANTS_PATH",
              "commissions_path": "FEES_COMMISSIONS_PATH", "sales_reports_path": "SALES_REPORTS_PATH",
-             "price_unit": "DIGIKALA_PRICE_UNIT", "suggested_price_unit": "DIGIKALA_SUGGESTED_PRICE_UNIT"}
+             "price_unit": "DIGIKALA_PRICE_UNIT", "suggested_price_unit": "DIGIKALA_SUGGESTED_PRICE_UNIT",
+             "write_mode": "WRITE_MODE"}
 
 
 def check_bale_base(url: str, allowed_hosts: str) -> str | None:
@@ -185,6 +190,20 @@ class Settings(BaseModel):
     floor_category_field: str = "category_id"
     cost_sku_field: str = "supplier_code"
 
+    # ---------- Part 6: operations (writes to Digikala) ----------
+    # off = nothing is ever written (default) | dry_run = every write is only logged | live = really sent.
+    write_mode: str = "off"
+    reprice_interval_seconds: float = 900  # pricing bot cycle (15 min, like the common default)
+    reprice_max_change_pct: float = 10  # one action never moves the price more than this %
+    reprice_max_changes_per_day: int = 48  # per variant, applied changes only
+    reprice_cooldown_seconds: float = 300  # per variant, between two applied changes
+    reprice_raise_step_pct: float = 1.0  # step up when we are the only winner (rule can override)
+    reprice_round_rial: int = 1000  # prices are rounded to this many Rial (100 Toman)
+    low_stock_threshold: int = 2  # alert when available stock <= this
+    promo_autojoin_natures: str = "incredible_offer"  # promotion natures the auto-join may use
+    promo_order_limit: int = 2
+    promo_price_limit: int = 5
+
     rate_limit_requests: int = 30
     rate_limit_period_seconds: float = 30
     max_concurrent: int = 3
@@ -242,6 +261,14 @@ class Settings(BaseModel):
         v = v.strip().lower()
         if v not in ("rial", "toman", "unknown"):
             raise ValueError("must be rial or toman")
+        return v
+
+    @field_validator("write_mode")
+    @classmethod
+    def _write_mode(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in WRITE_MODES:
+            raise ValueError("must be off, dry_run or live")
         return v
 
     @model_validator(mode="after")
@@ -405,6 +432,17 @@ def load_settings() -> Settings:
     put("bale_allowed_hosts", "BALE_ALLOWED_HOSTS")
     put("floor_category_field", "FLOOR_CATEGORY_FIELD")
     put("cost_sku_field", "COST_SKU_FIELD")
+    put("write_mode", "WRITE_MODE", lambda v: v.strip().lower())
+    put("reprice_interval_seconds", "REPRICE_INTERVAL_SECONDS", float)
+    put("reprice_max_change_pct", "REPRICE_MAX_CHANGE_PCT", float)
+    put("reprice_max_changes_per_day", "REPRICE_MAX_CHANGES_PER_DAY", int)
+    put("reprice_cooldown_seconds", "REPRICE_COOLDOWN_SECONDS", float)
+    put("reprice_raise_step_pct", "REPRICE_RAISE_STEP_PCT", float)
+    put("reprice_round_rial", "REPRICE_ROUND_RIAL", int)
+    put("low_stock_threshold", "LOW_STOCK_THRESHOLD", int)
+    put("promo_autojoin_natures", "PROMO_AUTOJOIN_NATURES")
+    put("promo_order_limit", "PROMO_ORDER_LIMIT", int)
+    put("promo_price_limit", "PROMO_PRICE_LIMIT", int)
     put("rate_limit_requests", "RATE_LIMIT_REQUESTS", int)
     put("rate_limit_period_seconds", "RATE_LIMIT_PERIOD_SECONDS", float)
     put("max_concurrent", "MAX_CONCURRENT", int)

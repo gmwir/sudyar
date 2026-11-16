@@ -34,7 +34,7 @@ from .auth import LoginThrottle, PasswordGate, WebConfigError, check_bind, csrf_
 log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 ASSET_VERSION = "1"
-TABS = (("today", "امروز", "/"), ("radar", "رادار", "/radar"), ("floor", "کف قیمت", "/floor"), ("costs", "قیمت خرید", "/costs"), ("settings", "تنظیمات", "/settings"))
+TABS = (("today", "امروز", "/"), ("radar", "رادار", "/radar"), ("floor", "کف قیمت", "/floor"), ("costs", "قیمت خرید", "/costs"), ("ops", "عملیات", "/ops"), ("settings", "تنظیمات", "/settings"))
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 
@@ -445,6 +445,12 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
 
     def settings_ctx(session: Session, **extra):
         return dict(c=data.build_connection(session, settings, now_fn()), a=data.build_alerts(session, settings), **extra)
+
+    @app.get("/ops", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def ops_page(request: Request, session: Session = Depends(get_session)):
+        """Part 6 overview. READ-ONLY page: it shows what the bot/sync stored; it changes nothing."""
+        from .ops_view import build_ops
+        return render(request, "ops.html", "ops", title="عملیات", v=build_ops(session, settings))
 
     @app.get("/settings", dependencies=[Depends(require_auth)], include_in_schema=False)
     def settings_page(request: Request, session: Session = Depends(get_session)):

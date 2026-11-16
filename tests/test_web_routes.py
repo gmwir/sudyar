@@ -8,7 +8,7 @@ from sudyar.models import AppSetting, ApiCallLog, Variant
 from sudyar.ui_settings import load_ui_settings
 from webfx import NOW, TOKEN, client, make_app, make_factory, make_settings, seed, variant
 
-PAGES = ["/", "/radar", "/floor", "/settings", "/partials/profit"]
+PAGES = ["/", "/radar", "/floor", "/settings", "/partials/profit", "/ops"]
 
 
 @pytest.fixture

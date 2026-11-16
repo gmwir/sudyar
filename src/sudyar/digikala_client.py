@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -19,6 +20,22 @@ ORDER_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.000Z"  # the API's Y-m-d\\TH:i:s.v\\Z (UTC,
 
 # Called for every API attempt: (endpoint, http_status_or_None, seconds)
 CallLogger = Callable[[str, int | None, float], None]
+
+
+# Part 6 read endpoints (GET only, official Open API document). {id} parts must be digits.
+EXTRA_READ_PATHS = frozenset({
+    "/open-api/v1/inventories",  # scope inventory
+    "/open-api/v1/invoices",  # scope invoice
+    "/open-api/v1/finance/payouts",  # scope invoice
+    "/open-api/v1/ship-by-seller-orders",  # scope sbs_orders
+    "/open-api/v1/pricing/promotions",  # scope promotion
+    "/open-api/v1/pricing/smart-discount/variants/eligible",  # scope promotion
+})
+EXTRA_READ_PATTERNS = (
+    re.compile(r"^/open-api/v1/ship-by-seller-orders/customer/[1-9][0-9]{0,18}$"),  # label printing only, never stored
+    re.compile(r"^/open-api/v1/pricing/promotions/[1-9][0-9]{0,18}/variants/eligible$"),
+    re.compile(r"^/open-api/v1/pricing/price-stats/[1-9][0-9]{0,18}/boundary$"),
+)
 
 
 class ReadOnlyViolation(Exception):
@@ -72,7 +89,7 @@ class DigikalaClient:
         if not path.startswith("/") or path.startswith("//") or "://" in path:
             # an absolute URL here would send the Bearer token to another host
             raise ValueError("API path must start with a single '/' (no host)")
-        if path not in self.allowed_paths():
+        if path not in self.allowed_paths() and not _extra_read_allowed(path):
             # only the read endpoints Sudyar is configured for; anything else is refused before any network call
             raise ReadOnlyViolation(f"Blocked GET {path}: not one of the configured read endpoints.")
 
@@ -195,6 +212,41 @@ class DigikalaClient:
             {"product_variant_id": product_variant_id, "target_rank": target_rank},
         )
         return _suggested_price(data)
+
+
+    # ------------------------------------------------------------------ Part 6 reads
+    async def get_list_page(self, path: str, page: int, extra: dict[str, Any] | None = None
+                            ) -> tuple[list[dict[str, Any]], int | None]:
+        """One page of any Part 6 list endpoint (paths are still checked against the allow-list)."""
+        params: dict[str, Any] = {self.settings.page_param: page, self.settings.page_size_param: self.settings.page_size,
+                                  **(extra or {})}
+        return await self.get_page(path, params)
+
+    async def iter_list(self, path: str, extra: dict[str, Any] | None = None, max_pages: int = 200
+                        ) -> AsyncIterator[dict[str, Any]]:
+        for page in range(1, max_pages + 1):
+            items, total = await self.get_list_page(path, page, extra)
+            for it in items:
+                yield it
+            if (total is not None and page >= total) or (total is None and len(items) < self.settings.page_size):
+                return
+        raise ApiError(f"{path}: more than {max_pages} pages; stopped (nothing partial is trusted)")
+
+    async def get_price_boundary(self, variant_id: int) -> dict[str, Any] | None:
+        """GET /pricing/price-stats/{variant_id}/boundary -> data.default_price_boundary {min/max_allowed_price}."""
+        data = await self.get(f"/open-api/v1/pricing/price-stats/{int(variant_id)}/boundary")
+        b = _dig(data, "data.default_price_boundary")
+        return b if isinstance(b, dict) else None
+
+    async def get_sbs_customer(self, shipment_id: int) -> dict[str, Any]:
+        """Customer name/address for ONE label. Used only to render a label; never stored or logged."""
+        data = await self.get(f"/open-api/v1/ship-by-seller-orders/customer/{int(shipment_id)}")
+        d = _dig(data, "data")
+        return d if isinstance(d, dict) else {}
+
+
+def _extra_read_allowed(path: str) -> bool:
+    return path in EXTRA_READ_PATHS or any(p.match(path) for p in EXTRA_READ_PATTERNS)
 
 
 def _suggested_price(data: dict[str, Any]) -> int | None:

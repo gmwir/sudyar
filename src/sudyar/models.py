@@ -255,3 +255,167 @@ class SellerConnection(Base):
     connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_error: Mapped[str | None] = mapped_column(String(300))
+
+
+# ====================================================================== Part 6: operations (Markobot parity)
+# Everything below is written by Sudyar itself. Writes to Digikala go ONLY through writer.DigikalaWriter, which is
+# OFF by default and logs every attempt in write_log. No customer name/phone/address is ever stored.
+
+
+class WriteLog(Base):
+    """One row per write attempt to Digikala (dry-run included). Never deleted."""
+
+    __tablename__ = "write_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    op: Mapped[str] = mapped_column(String(64), index=True)
+    target: Mapped[str | None] = mapped_column(String(200))
+    mode: Mapped[str] = mapped_column(String(16))  # dry_run | live
+    payload: Mapped[dict | list | None] = mapped_column(JSON)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(String(300))
+    source: Mapped[str | None] = mapped_column(String(32))  # repricer | stock_pool | promotion | sbs | bulk | manual
+
+
+class RepriceRule(Base):
+    """Pricing-bot rule for one variant. The profit floor is ALWAYS enforced on top of the rule."""
+
+    __tablename__ = "reprice_rules"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    strategy: Mapped[str] = mapped_column(String(16), default="buybox")  # buybox | undercut | rank | fx | hold
+    gap_toman: Mapped[int | None] = mapped_column(BigInteger)  # undercut: this much below the Buy Box
+    gap_pct: Mapped[float | None] = mapped_column(Float)  # undercut: or this % below the Buy Box
+    target_rank: Mapped[int | None] = mapped_column(Integer)  # rank strategy
+    max_toman: Mapped[int | None] = mapped_column(BigInteger)  # ceiling; never priced above
+    raise_when_alone: Mapped[bool] = mapped_column(Boolean, default=True)  # winner and no challenge -> step up
+    raise_step_pct: Mapped[float | None] = mapped_column(Float)
+    fx_currency: Mapped[str | None] = mapped_column(String(8))
+    fx_base_amount: Mapped[float | None] = mapped_column(Float)  # price in that currency
+    fx_markup_pct: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RepriceAction(Base):
+    """Every decision the pricing bot took (changed or not). Used for caps, cooldown and the web page."""
+
+    __tablename__ = "reprice_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    old_price: Mapped[int | None] = mapped_column(BigInteger)  # Rial, as Digikala
+    new_price: Mapped[int | None] = mapped_column(BigInteger)  # Rial; NULL = no change
+    reason: Mapped[str] = mapped_column(String(200))
+    mode: Mapped[str] = mapped_column(String(16))  # off | dry_run | live
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class FxRate(Base):
+    __tablename__ = "fx_rates"
+
+    currency: Mapped[str] = mapped_column(String(8), primary_key=True)  # USD, AED, CNY, ...
+    toman_per_unit: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InventoryItem(Base):
+    """GET /open-api/v1/inventories (scope inventory), one row per product variant."""
+
+    __tablename__ = "inventory_items"
+
+    product_variant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    supplier_code: Mapped[str | None] = mapped_column(String(200))
+    title: Mapped[str | None] = mapped_column(String(1000))
+    seller_stock: Mapped[int | None] = mapped_column(Integer)
+    warehouse_stock: Mapped[int | None] = mapped_column(Integer)
+    available: Mapped[int | None] = mapped_column(Integer)
+    reserve: Mapped[int | None] = mapped_column(Integer)
+    has_dead_stock: Mapped[bool | None] = mapped_column(Boolean)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StockPool(Base):
+    """One physical stock shared by several Digikala codes (variants)."""
+
+    __tablename__ = "stock_pools"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    physical_qty: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StockPoolMember(Base):
+    __tablename__ = "stock_pool_members"
+
+    pool_id: Mapped[int] = mapped_column(ForeignKey("stock_pools.id"), primary_key=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True, unique=True)
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class Invoice(Base):
+    """GET /open-api/v1/invoices (scope invoice). Amounts as returned (Rial)."""
+
+    __tablename__ = "invoices"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    start_date: Mapped[str | None] = mapped_column(String(40))
+    end_date: Mapped[str | None] = mapped_column(String(40))
+    cash_sale_date: Mapped[str | None] = mapped_column(String(40))
+    credit_sale_date: Mapped[str | None] = mapped_column(String(40))
+    total_amount: Mapped[int | None] = mapped_column(BigInteger)
+    payout_status: Mapped[str | None] = mapped_column(String(40))
+    settlement_status: Mapped[str | None] = mapped_column(String(40))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Payout(Base):
+    """GET /open-api/v1/finance/payouts (scope invoice)."""
+
+    __tablename__ = "payouts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    amount: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str | None] = mapped_column(String(40))
+    tracking_code: Mapped[str | None] = mapped_column(String(100))
+    payout_date: Mapped[str | None] = mapped_column(String(40))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SbsShipment(Base):
+    """Ship-by-seller shipment. NO customer data (name/phone/address/national code) is stored."""
+
+    __tablename__ = "sbs_shipments"
+
+    shipment_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    status: Mapped[str | None] = mapped_column(String(64))
+    status_fa: Mapped[str | None] = mapped_column(String(200))
+    next_status: Mapped[str | None] = mapped_column(String(40))
+    promise_date: Mapped[str | None] = mapped_column(String(40))
+    order_date: Mapped[str | None] = mapped_column(String(40))
+    shipping_provider: Mapped[str | None] = mapped_column(String(40))
+    tracking_code: Mapped[str | None] = mapped_column(String(100))
+    tracking_code_status: Mapped[str | None] = mapped_column(String(20))
+    item_count: Mapped[int | None] = mapped_column(Integer)
+    is_cancelled: Mapped[bool | None] = mapped_column(Boolean)
+    items: Mapped[list | None] = mapped_column(JSON)  # [{"title":..., "qty":...}] titles only
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Promotion(Base):
+    """GET /open-api/v1/pricing/promotions (scope promotion)."""
+
+    __tablename__ = "promotions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str | None] = mapped_column(String(300))
+    nature: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str | None] = mapped_column(String(40))
+    start_at: Mapped[str | None] = mapped_column(String(40))
+    end_at: Mapped[str | None] = mapped_column(String(40))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -9,7 +9,8 @@ from .logging_setup import error_code, setup_logging, short_error
 USAGE = ("Usage: python -m sudyar [check-config | sync-variants | buybox-status | "
          "winning-price <variant_id> | radar-once | radar-run | import-costs FILE [--dry-run] | "
          "web [--host H] [--port N] | floor-report [--top N] [--range R] | sync-fees [--force] | sales-sync --range last_30_days [--category-id N] "
-         "[--force] | orders-sync [--days N] [--force] | orders-show | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | oauth-keygen | oauth-status | healthcheck]")
+         "[--force] | orders-sync [--days N] [--force] | orders-show | set-floor ... | set-brand --variant ID --brand-id N | list-brands CATEGORY_ID | oauth-keygen | oauth-status | healthcheck]\n"
+         "Part 6 (pricing bot, stock, finance, ship-by-seller, promotions, bulk): python -m sudyar ops-help")
 
 
 READ_ONLY_SCOPES = (  # official Service Hub scopes, all read-only
@@ -79,6 +80,9 @@ def check_config() -> int:
     if notice:
         print(f"WARNING: {notice}")
     print("Notifications: " + ("ENABLED" if s.notify_enabled else "DRY-RUN (messages are only printed, never sent)"))
+    print("Writes to Digikala (WRITE_MODE): " + {"off": "OFF (nothing is ever changed)",
+                                                 "dry_run": "DRY-RUN (only recorded in write_log)",
+                                                 "live": "LIVE (pricing bot / stock / promotions really change your panel)"}[s.write_mode])
     return 0
 
 
@@ -603,6 +607,9 @@ def main(argv: list[str]) -> int:
     cmds = {"oauth-keygen": 1, "oauth-status": 1, "check-config": 1, "sync-variants": 1, "buybox-status": 1, "winning-price": 2, "radar-once": 1,
             "radar-run": 1, "healthcheck": 1}
     free = ("web", "sync-fees", "import-costs", "floor-report", "set-floor", "sales-sync", "orders-sync", "orders-show", "set-brand", "list-brands")  # take options
+    from .ops_cli import OPS_COMMANDS, run as ops_run
+    if argv and argv[0] in OPS_COMMANDS:
+        return ops_run(argv[0], argv[1:])
     if not argv or (argv[0] not in free and cmds.get(argv[0]) != len(argv)):
         print(USAGE)
         return 2

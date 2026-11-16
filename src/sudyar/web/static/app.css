@@ -167,6 +167,7 @@ select, input[type=password], input[type=text] {
 
 /* buy-cost page */
 .ic-costs { --icon: url("/static/icons/wallet.svg"); }
+.ic-ops { --icon: url("/static/icons/gear.svg"); }
 .tablewrap { overflow-x: auto; }
 table.costs { width: 100%; border-collapse: collapse; }
 table.costs th { text-align: right; font-size: 12px; color: var(--ink-600); padding: 6px; }
