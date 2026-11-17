@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+
+from sqlalchemy import JSON, CheckConstraint, Date, UniqueConstraint, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Variant(Base):
+    __tablename__ = "variants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    digikala_variant_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    product_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    title: Mapped[str | None] = mapped_column(String(1000))
+    # Money values are stored exactly as Digikala returns them (unit Rial/Toman: UNVERIFIED).
+    our_price: Mapped[int | None] = mapped_column(BigInteger)  # = price_sale
+    stock: Mapped[int | None] = mapped_column(Integer)  # = marketplace_seller_stock
+    product_variant_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    product_title: Mapped[str | None] = mapped_column(String(1000))
+    is_archived: Mapped[bool | None] = mapped_column(Boolean)
+    price_sale: Mapped[int | None] = mapped_column(BigInteger)
+    cash_selling_price: Mapped[int | None] = mapped_column(BigInteger)
+    price_limit: Mapped[int | None] = mapped_column(BigInteger)
+    marketplace_seller_stock: Mapped[int | None] = mapped_column(Integer)
+    warehouse_stock: Mapped[int | None] = mapped_column(Integer)
+    buy_box_price: Mapped[int | None] = mapped_column(BigInteger)
+    is_buy_box_winner: Mapped[bool | None] = mapped_column(Boolean)
+    is_seller_buy_box_winner: Mapped[bool | None] = mapped_column(Boolean)
+    is_in_buy_box_challenge: Mapped[bool | None] = mapped_column(Boolean)
+    is_sku_winner: Mapped[bool | None] = mapped_column(Boolean)
+    rating: Mapped[float | None] = mapped_column(Float)
+    lead_time: Mapped[int | None] = mapped_column(Integer)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    raw_json: Mapped[dict] = mapped_column(JSON)
+
+
+class ApiCallLog(Base):
+    __tablename__ = "api_call_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    called_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    endpoint: Mapped[str] = mapped_column(String(500))
+    status: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class VariantSnapshot(Base):
+    """History: one row per variant per sync. Never deleted."""
+
+    __tablename__ = "variant_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    price_sale: Mapped[int | None] = mapped_column(BigInteger)
+    buy_box_price: Mapped[int | None] = mapped_column(BigInteger)
+    is_seller_buy_box_winner: Mapped[bool | None] = mapped_column(Boolean)
+    is_in_buy_box_challenge: Mapped[bool | None] = mapped_column(Boolean)
+    stock: Mapped[int | None] = mapped_column(Integer)
+    active: Mapped[bool | None] = mapped_column(Boolean)  # needed to detect DEACTIVATED
+
+
+class RadarEvent(Base):
+    """A change detected between two consecutive snapshots of one variant."""
+
+    __tablename__ = "radar_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    type: Mapped[str] = mapped_column(String(32), index=True)
+    old_value: Mapped[str | None] = mapped_column(String(200))
+    new_value: Mapped[str | None] = mapped_column(String(200))
+    details: Mapped[dict | None] = mapped_column(JSON)  # cause, gap, suggested_price, ...
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notify_status: Mapped[str | None] = mapped_column(String(32))
+
+
+class HotOverride(Base):
+    """Variants a human wants polled at the HOT rate no matter what."""
+
+    __tablename__ = "hot_overrides"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    note: Mapped[str | None] = mapped_column(String(500))
+
+
+class VariantCost(Base):
+    """Our purchase cost per variant (toman). Optional: the app works without any rows."""
+
+    __tablename__ = "variant_costs"
+    __table_args__ = (CheckConstraint("buy_cost IS NULL OR buy_cost > 0", name="ck_variant_costs_buy_cost_positive"),)
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    buy_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = unknown
+    source: Mapped[str] = mapped_column(String(16))  # manual | excel
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CostAudit(Base):
+    """One line per change of a buy cost (web or file import). Local only; never sent anywhere."""
+
+    __tablename__ = "cost_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(Integer, index=True)
+    digikala_variant_id: Mapped[str] = mapped_column(String(64))
+    old_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = no cost before
+    new_cost: Mapped[int | None] = mapped_column(BigInteger)  # NULL = cost cleared
+    source: Mapped[str] = mapped_column(String(16))  # manual | file
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class FloorSetting(Base):
+    """Profit-floor rule. Most specific scope wins: variant > brand > category > global."""
+
+    __tablename__ = "floor_settings"
+    __table_args__ = (UniqueConstraint("scope", "scope_key", name="uq_floor_settings_scope"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(16))  # global | brand | category | variant
+    scope_key: Mapped[str] = mapped_column(String(200), default="")  # "" for global
+    margin_pct: Mapped[float | None] = mapped_column(Float)  # net profit as % of selling price
+    min_profit_toman: Mapped[int | None] = mapped_column(BigInteger)
+    floor_manual_toman: Mapped[int | None] = mapped_column(BigInteger)
+    floor_manual_pct: Mapped[float | None] = mapped_column(Float)  # % of our current price
+    # Manual cost components (no Digikala endpoint exists for them). Each is a % of price and/or a
+    # fixed Toman amount; unset (NULL) = NOT included, and reports say so.
+    fulfillment_pct: Mapped[float | None] = mapped_column(Float)
+    fulfillment_toman: Mapped[int | None] = mapped_column(BigInteger)
+    tax_pct: Mapped[float | None] = mapped_column(Float)
+    tax_toman: Mapped[int | None] = mapped_column(BigInteger)
+    ad_share_pct: Mapped[float | None] = mapped_column(Float)
+    ad_share_toman: Mapped[int | None] = mapped_column(BigInteger)
+    return_reserve_pct: Mapped[float | None] = mapped_column(Float)
+    return_reserve_toman: Mapped[int | None] = mapped_column(BigInteger)
+    packaging_pct: Mapped[float | None] = mapped_column(Float)
+    packaging_toman: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class FloorEvent(Base):
+    """Audit trail: written when a variant's floor (or the reason for no floor) changes."""
+
+    __tablename__ = "floor_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    floor: Mapped[int | None] = mapped_column(BigInteger)  # effective floor (toman)
+    suggested_floor: Mapped[int | None] = mapped_column(BigInteger)  # computed from cost/fees
+    reason: Mapped[str] = mapped_column(String(200))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class FeeCache(Base):
+    """Fees read from Digikala (GET), cached so we never guess and never over-call."""
+
+    __tablename__ = "fee_cache"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Commission(Base):
+    """One row of GET /open-api/v1/commissions/. `commission` etc. are FRACTIONS (0.03 = 3%)."""
+
+    __tablename__ = "commissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    main_category_id: Mapped[str | None] = mapped_column(String(64))
+    category_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    brand_id: Mapped[str | None] = mapped_column(String(64))
+    brand_title: Mapped[str | None] = mapped_column(String(300))
+    commission: Mapped[float | None] = mapped_column(Float)
+    extra_commission: Mapped[float | None] = mapped_column(Float)
+    return_free_commission: Mapped[float | None] = mapped_column(Float)
+    current_lead_time: Mapped[int | None] = mapped_column(Integer)  # API field: currentLeadTime
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class VariantBrand(Base):
+    """Manual brand_id (taken from commissions) for a variant. Variants carry no brand field."""
+
+    __tablename__ = "variant_brands"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    brand_id: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProductSales(Base):
+    """GET /open-api/v1/insight/sales-reports items, per product_id and range."""
+
+    __tablename__ = "product_sales"
+
+    product_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    range: Mapped[str] = mapped_column(String(32), primary_key=True)
+    net_item_sold: Mapped[int | None] = mapped_column(Integer)
+    net_sales_amount: Mapped[int | None] = mapped_column(BigInteger)  # unit as returned (unverified)
+    order_count: Mapped[int | None] = mapped_column(Integer)
+    visit_count: Mapped[int | None] = mapped_column(Integer)
+    conversion_rate: Mapped[float | None] = mapped_column(Float)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppSetting(Base):
+    """Settings edited in the web UI (alert hour, quiet hours, notify on/off). Key -> JSON value."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DailySales(Base):
+    """Real sales per Tehran day and variant, from the Order API. NO personal data and NO order ids are stored.
+
+    quantity is NET (processed minus returned, returns counted on the day the order was created).
+    unit_sale_price is in the unit Digikala returned (Rial by default) after the discount rule in config.
+    """
+
+    __tablename__ = "daily_sales"
+
+    day: Mapped["date"] = mapped_column(Date, primary_key=True)
+    product_variant_id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    unit_sale_price: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SellerConnection(Base):
+    """Service Hub OAuth connection (one seller per install for now). Tokens are Fernet-encrypted, never plain."""
+
+    __tablename__ = "seller_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scopes: Mapped[str | None] = mapped_column(String(500))
+    access_token_enc: Mapped[str] = mapped_column(String(8000))
+    refresh_token_enc: Mapped[str] = mapped_column(String(4000))
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_error: Mapped[str | None] = mapped_column(String(300))
+
+
+# ====================================================================== Part 6: operations (Markobot parity)
+# Everything below is written by Sudyar itself. Writes to Digikala go ONLY through writer.DigikalaWriter, which is
+# OFF by default and logs every attempt in write_log. No customer name/phone/address is ever stored.
+
+
+class WriteLog(Base):
+    """One row per write attempt to Digikala (dry-run included). Never deleted."""
+
+    __tablename__ = "write_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    op: Mapped[str] = mapped_column(String(64), index=True)
+    target: Mapped[str | None] = mapped_column(String(200))
+    mode: Mapped[str] = mapped_column(String(16))  # dry_run | live
+    payload: Mapped[dict | list | None] = mapped_column(JSON)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(String(300))
+    source: Mapped[str | None] = mapped_column(String(32))  # repricer | stock_pool | promotion | sbs | bulk | manual
+
+
+class RepriceRule(Base):
+    """Pricing-bot rule for one variant. The profit floor is ALWAYS enforced on top of the rule."""
+
+    __tablename__ = "reprice_rules"
+
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    strategy: Mapped[str] = mapped_column(String(16), default="buybox")  # buybox | undercut | rank | fx | hold
+    gap_toman: Mapped[int | None] = mapped_column(BigInteger)  # undercut: this much below the Buy Box
+    gap_pct: Mapped[float | None] = mapped_column(Float)  # undercut: or this % below the Buy Box
+    target_rank: Mapped[int | None] = mapped_column(Integer)  # rank strategy
+    max_toman: Mapped[int | None] = mapped_column(BigInteger)  # ceiling; never priced above
+    raise_when_alone: Mapped[bool] = mapped_column(Boolean, default=True)  # winner and no challenge -> step up
+    raise_step_pct: Mapped[float | None] = mapped_column(Float)
+    fx_currency: Mapped[str | None] = mapped_column(String(8))
+    fx_base_amount: Mapped[float | None] = mapped_column(Float)  # price in that currency
+    fx_markup_pct: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RepriceAction(Base):
+    """Every decision the pricing bot took (changed or not). Used for caps, cooldown and the web page."""
+
+    __tablename__ = "reprice_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    old_price: Mapped[int | None] = mapped_column(BigInteger)  # Rial, as Digikala
+    new_price: Mapped[int | None] = mapped_column(BigInteger)  # Rial; NULL = no change
+    reason: Mapped[str] = mapped_column(String(200))
+    mode: Mapped[str] = mapped_column(String(16))  # off | dry_run | live
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class FxRate(Base):
+    __tablename__ = "fx_rates"
+
+    currency: Mapped[str] = mapped_column(String(8), primary_key=True)  # USD, AED, CNY, ...
+    toman_per_unit: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InventoryItem(Base):
+    """GET /open-api/v1/inventories (scope inventory), one row per product variant."""
+
+    __tablename__ = "inventory_items"
+
+    product_variant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    supplier_code: Mapped[str | None] = mapped_column(String(200))
+    title: Mapped[str | None] = mapped_column(String(1000))
+    seller_stock: Mapped[int | None] = mapped_column(Integer)
+    warehouse_stock: Mapped[int | None] = mapped_column(Integer)
+    available: Mapped[int | None] = mapped_column(Integer)
+    reserve: Mapped[int | None] = mapped_column(Integer)
+    has_dead_stock: Mapped[bool | None] = mapped_column(Boolean)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StockPool(Base):
+    """One physical stock shared by several Digikala codes (variants)."""
+
+    __tablename__ = "stock_pools"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    physical_qty: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StockPoolMember(Base):
+    __tablename__ = "stock_pool_members"
+
+    pool_id: Mapped[int] = mapped_column(ForeignKey("stock_pools.id"), primary_key=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), primary_key=True, unique=True)
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class Invoice(Base):
+    """GET /open-api/v1/invoices (scope invoice). Amounts as returned (Rial)."""
+
+    __tablename__ = "invoices"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    start_date: Mapped[str | None] = mapped_column(String(40))
+    end_date: Mapped[str | None] = mapped_column(String(40))
+    cash_sale_date: Mapped[str | None] = mapped_column(String(40))
+    credit_sale_date: Mapped[str | None] = mapped_column(String(40))
+    total_amount: Mapped[int | None] = mapped_column(BigInteger)
+    payout_status: Mapped[str | None] = mapped_column(String(40))
+    settlement_status: Mapped[str | None] = mapped_column(String(40))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Payout(Base):
+    """GET /open-api/v1/finance/payouts (scope invoice)."""
+
+    __tablename__ = "payouts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    amount: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str | None] = mapped_column(String(40))
+    tracking_code: Mapped[str | None] = mapped_column(String(100))
+    payout_date: Mapped[str | None] = mapped_column(String(40))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SbsShipment(Base):
+    """Ship-by-seller shipment. NO customer data (name/phone/address/national code) is stored."""
+
+    __tablename__ = "sbs_shipments"
+
+    shipment_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    status: Mapped[str | None] = mapped_column(String(64))
+    status_fa: Mapped[str | None] = mapped_column(String(200))
+    next_status: Mapped[str | None] = mapped_column(String(40))
+    promise_date: Mapped[str | None] = mapped_column(String(40))
+    order_date: Mapped[str | None] = mapped_column(String(40))
+    shipping_provider: Mapped[str | None] = mapped_column(String(40))
+    tracking_code: Mapped[str | None] = mapped_column(String(100))
+    tracking_code_status: Mapped[str | None] = mapped_column(String(20))
+    item_count: Mapped[int | None] = mapped_column(Integer)
+    is_cancelled: Mapped[bool | None] = mapped_column(Boolean)
+    items: Mapped[list | None] = mapped_column(JSON)  # [{"title":..., "qty":...}] titles only
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Promotion(Base):
+    """GET /open-api/v1/pricing/promotions (scope promotion)."""
+
+    __tablename__ = "promotions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str | None] = mapped_column(String(300))
+    nature: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str | None] = mapped_column(String(40))
+    start_at: Mapped[str | None] = mapped_column(String(40))
+    end_at: Mapped[str | None] = mapped_column(String(40))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

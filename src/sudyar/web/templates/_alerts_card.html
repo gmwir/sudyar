@@ -1,0 +1,45 @@
+<form id="alerts-card" class="card pad field gap12" method="post" action="/settings/alerts"
+      hx-post="/settings/alerts" hx-target="#alerts-card" hx-swap="outerHTML">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <span class="lbl">هشدار و گزارش</span>
+
+  <div class="toggle-row">
+    <div class="col">
+      <div>ارسال واقعی هشدار (بله / تلگرام)</div>
+      <p class="sub">
+        {% if a.dry_run %}الان آزمایشی است: پیام‌ها فقط در برنامه نوشته می‌شوند و جایی فرستاده نمی‌شوند.
+        {% else %}الان روشن است: هشدار به {{ a.channels_text }} فرستاده می‌شود.{% endif %}
+      </p>
+      {% if not a.can_send %}<p class="sub c-warning">برای ارسال واقعی، توکن بله یا تلگرام را در فایل .env بگذارید.</p>{% endif %}
+    </div>
+    <label class="switch"><input type="checkbox" name="notify" value="1" aria-label="ارسال واقعی هشدار"
+      {% if a.notify_on %}checked{% endif %}{% if not a.can_send %} disabled{% endif %}><i></i></label>
+  </div>
+
+  <div class="field">
+    <label for="report_hour">گزارش صبح چه ساعتی برسد؟</label>
+    <select id="report_hour" name="report_hour">
+      {% for h in range(0, 24) %}<option value="{{ h }}"{% if h == a.ui.report_hour %} selected{% endif %}>{{ hour_label(h) }}</option>{% endfor %}
+    </select>
+    <p class="sub">پیش‌فرض ساعت ۸ صبح است. ارسال خودکار گزارش صبح هنوز در برنامه فعال نشده؛ ساعت ذخیره می‌شود تا وقتی فعال شد استفاده شود.</p>
+  </div>
+
+  <div class="field">
+    <span class="lbl">ساعت آرام</span>
+    <div class="seg" role="radiogroup" aria-label="ساعت آرام">
+      <label><input type="radio" name="quiet_mode" value="always"{% if not a.ui.quiet_enabled %} checked{% endif %}><span>همیشه خبر بده</span></label>
+      <label><input type="radio" name="quiet_mode" value="quiet"{% if a.ui.quiet_enabled %} checked{% endif %}><span>شب‌ها ساکت</span></label>
+    </div>
+    <div class="inline-pair">
+      <div class="field"><label for="quiet_start">از ساعت</label>
+        <select id="quiet_start" name="quiet_start">{% for h in range(0, 24) %}<option value="{{ h }}"{% if h == a.ui.quiet_start %} selected{% endif %}>{{ hour_label(h) }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="quiet_end">تا ساعت</label>
+        <select id="quiet_end" name="quiet_end">{% for h in range(0, 24) %}<option value="{{ h }}"{% if h == a.ui.quiet_end %} selected{% endif %}>{{ hour_label(h) }}</option>{% endfor %}</select></div>
+    </div>
+    <p class="sub">{% if a.ui.quiet_enabled %}از {{ hour_label(a.ui.quiet_start) }} تا {{ hour_label(a.ui.quiet_end) }} هشدار نمی‌آید (پیش‌فرض ۲۳ تا ۷).{% else %}هشدار در همه‌ی ساعت‌ها می‌آید.{% endif %}</p>
+  </div>
+
+  {% if message %}<div class="notice {{ 'success' if ok else 'danger' }}" role="status">{{ message }}</div>{% endif %}
+  <button class="btn" type="submit">ذخیره‌ی تنظیم هشدار</button>
+  <p class="sub">هشدار فقط خبر می‌دهد و هیچ قیمتی را عوض نمی‌کند.</p>
+</form>

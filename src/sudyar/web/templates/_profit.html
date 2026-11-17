@@ -1,0 +1,33 @@
+{% if y.state == "ok" %}
+<p class="big {% if y.total_toman < 0 %}c-danger{% else %}c-success{% endif %}">{{ y.total_toman | toman }}</p>
+<p class="sub">سود واقعی دیروز، از فروش ثبت‌شده‌ی دیجی‌کالا: {{ y.units | fa }} عدد (مرجوعی کم شده) در {{ y.variants_used | fa }} تنوع.
+{% if y.excluded %}{{ y.excluded | fa }} تنوع بدون قیمت خرید یا کمیسیون کنار گذاشته شد؛ عدد واقعاً کمتر یا بیشتر است.{% endif %}
+{% if y.unknown %}{{ y.unknown | fa }} تنوع نامشخص (شناسه دقیقاً یک‌بار تطبیق نخورد) در سود حساب نشد.{% endif %}</p>
+{% if y.rejected %}<p class="notice warning" role="alert">{{ y.rejected | fa }} خط نامعتبر؛ سود دیروز ممکن است دقیق نباشد (روز ناقص است).</p>{% endif %}
+{% if y.suspect_duplicates %}<p class="notice warning" role="alert">{{ y.suspect_duplicates | fa }} خط احتمالاً تکراری (دیجی‌کالا شناسه‌ی قلم نداده)؛ حذف نشد، سود دیروز ممکن است دقیق نباشد.</p>{% endif %}
+<p class="muted">آخرین خواندن سفارش‌ها: {{ y.synced_at | ago }}. {{ y.assumptions }}</p>
+{% else %}
+<p class="big unknown">{{ unknown }}</p>
+{% if y.state == "no_sales" %}<p class="sub">برای دیروز فروشی ثبت نشده است.</p>
+{% elif y.state == "nothing_usable" %}<p class="sub">فروش دیروز خوانده شد، ولی برای هیچ تنوعی قیمت خرید و کمیسیون هم‌زمان ثبت نیست ({{ y.excluded | fa }} تنوع{% if y.unknown %}، {{ y.unknown | fa }} نامشخص{% endif %}).</p>
+{% if y.rejected %}<p class="notice warning" role="alert">{{ y.rejected | fa }} خط نامعتبر؛ سود دیروز ممکن است دقیق نباشد.</p>{% endif %}
+{% elif y.state == "no_scope" %}<p class="sub">دسترسی «order» به توکن داده نشده؛ سود واقعی دیروز ساخته نمی‌شود. تخمین زیر جایگزین است.</p>
+{% elif y.state == "expired" %}<p class="sub">توکن منقضی است؛ سود واقعی دیروز خوانده نمی‌شود.</p>
+{% else %}<p class="sub">فروش دیروز هنوز خوانده نشده؛ دستور orders-sync را اجرا کنید. تخمین زیر جایگزین است.</p>{% endif %}
+{% endif %}
+{% if y.state != "ok" and y.state != "no_sales" %}
+{% if p is none %}{% elif p.state == "ok" %}
+<p class="label sub">تخمین جایگزین: سود {{ p.range_fa }} (فروش × سود هر عدد با قیمت امروز)</p>
+<p class="big mid {% if p.total_toman < 0 %}c-danger{% else %}c-success{% endif %}">{{ p.total_toman | toman }}</p>
+<p class="sub">بر اساس {{ p.products_used | fa }} محصول و {{ p.units | fa }} عدد فروش.
+{% if p.excluded_multi or p.excluded_missing %}
+{{ (p.excluded_multi + p.excluded_missing) | fa }} محصول کنار گذاشته شد
+({% if p.excluded_missing %}{{ p.excluded_missing | fa }} بدون قیمت خرید یا کمیسیون{% endif %}{% if p.excluded_missing and p.excluded_multi %}، {% endif %}{% if p.excluded_multi %}{{ p.excluded_multi | fa }} چندتنوعی{% endif %}).
+{% endif %}</p>
+<p class="muted">آخرین خواندن آمار فروش: {{ p.synced_at | ago }}. این تخمین است، نه گزارش رسمی.</p>
+{% elif p.state == "nothing_usable" %}
+<p class="sub">تخمینی ساخته نشد: برای محصول‌های فروخته‌شده قیمت خرید یا کمیسیون ثبت نشده ({{ (p.excluded_missing + p.excluded_multi) | fa }} محصول).</p>
+{% else %}
+<p class="sub">آمار فروش هنوز خوانده نشده؛ تخمینی وجود ندارد. «۲ب» را بزنید.</p>
+{% endif %}
+{% endif %}

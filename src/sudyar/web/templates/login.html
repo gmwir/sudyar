@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>ورود به سودیار</h1><p class="sub">برای دیدن اطلاعات، رمز را وارد کنید.</p></div>
+<form method="post" action="/login" class="card pad field gap12">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="password">رمز</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+  {% if error %}<div class="notice danger" role="alert">{{ error }}</div>{% endif %}
+  <button class="btn" type="submit">ورود</button>
+</form>
+<p class="muted">فقط خواندنی است؛ چیزی در دیجی‌کالا تغییر نمی‌کند.</p>
+{% endblock %}

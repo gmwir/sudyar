@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b0b0f" media="(prefers-color-scheme: dark)">
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"selfRequestsOnly":true,"allowEval":false,"allowScriptTags":false}'>
+  <meta name="robots" content="noindex">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <title>{{ title }} · سودیار</title>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+<div class="app">
+  {% block body %}
+  <main class="page" id="main">{% block content %}{% endblock %}</main>
+  {% if nav %}
+  <nav class="tabbar" aria-label="بخش‌های برنامه">
+    {% for key, label, href in tabs %}
+    <a class="tab" href="{{ href }}"{% if key == nav %} aria-current="page"{% endif %}><span class="ic ic-{{ key }}" aria-hidden="true"></span>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+  {% endblock %}
+</div>
+<script src="/static/htmx.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

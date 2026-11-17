@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>اتصال به دیجی‌کالا</h1><p class="sub">با تأیید خود فروشنده، فقط خواندن</p></div>
+
+{% if notice %}<div class="notice {{ 'success' if notice[0] else 'danger' }}" role="status">{{ notice[1] }}</div>{% endif %}
+
+<section class="card pad field gap12" aria-labelledby="st-title">
+  <span class="lbl" id="st-title">وضعیت</span>
+  {% if st.connected %}
+  <div class="scope"><span class="chip success">متصل</span>
+    <div class="col"><div>فروشگاه به سودیار وصل است</div>
+      <p class="sub">از {{ st.connected_at | ago }}{% if st.refresh_expires_at %} · اعتبار یک‌ساله تا {{ st.refresh_expires_at | ago }}{% endif %}</p></div></div>
+  {% if st.last_error %}<div class="notice danger">آخرین خطای تمدید: {{ st.last_error }}</div>{% endif %}
+  {% else %}
+  <div class="scope"><span class="chip neutral">وصل نیست</span>
+    <div class="col"><div>هنوز فروشگاهی وصل نشده</div><p class="sub">{% if self_token %}فعلاً سودیار با Self Token کار می‌کند.{% else %}بدون اتصال، سودیار چیزی نمی‌خواند.{% endif %}</p></div></div>
+  {% endif %}
+</section>
+
+<section class="card pad field gap12" aria-labelledby="sc-title">
+  <span class="lbl" id="sc-title">سودیار چه چیزهایی را می‌بیند</span>
+  <ul class="audit">{% for sc in r.scopes.split() %}<li>{{ scope_fa.get(sc, sc) }}</li>{% endfor %}</ul>
+  <p class="sub">هیچ قیمت، سفارش یا کالایی در دیجی‌کالا تغییر نمی‌کند.</p>
+</section>
+
+{% if r.ready %}
+<a class="btn" href="/connect/start">{% if st.connected %}اتصال دوباره{% else %}اتصال به دیجی‌کالا{% endif %}</a>
+{% else %}
+<div class="notice info"><b>هنوز آماده نیست.</b>
+  {% if not r.client_code %} کد اپ (client_code) بعد از تأیید سودیار در سرویس‌هاب گرفته و در تنظیمات گذاشته می‌شود.{% endif %}
+  {% if not r.redirect_ok %} آدرس بازگشت باید https باشد (روی سرور خودکار است).{% endif %}
+  {% if not r.private_key %} کلید خصوصی ساخته نشده (oauth-keygen).{% endif %}
+  {% if not r.token_key %} کلید رمزگذاری توکن (SUDYAR_TOKEN_KEY) تنظیم نشده.{% endif %}
+  {% if not r.scopes_ok %} دسترسی‌های تنظیم‌شده فقط‌خواندنی نیستند؛ اتصال انجام نمی‌شود.{% endif %}
+</div>
+{% endif %}
+
+{% if st.connected %}
+<form method="post" action="/connect/disconnect">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="btn secondary" type="submit">قطع اتصال در سودیار</button>
+</form>
+<p class="muted">برای قطع کامل، دسترسی سودیار را در پنل فروشندگی دیجی‌کالا هم لغو کنید.</p>
+{% endif %}
+{% endblock %}

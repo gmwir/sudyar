@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>عملیات</h1><p class="sub">ربات قیمت · موجودی · پول · ارسال فروشنده · پروموشن</p></div>
+
+<div class="notice {{ 'danger' if v.mode == 'live' else 'info' }}" role="status">
+  <b>حالت نوشتن در دیجی‌کالا:</b> {{ v.mode_fa }}.
+  این صفحه فقط نمایش است و چیزی را عوض نمی‌کند. ربات هرگز زیر «کف قیمت» نمی‌رود و کالای بدون کف قیمت را دست نمی‌زند.
+</div>
+
+<section class="card pad gap12" aria-labelledby="money">
+  <span class="lbl" id="money">پول شما (از صورتحساب‌ها و تسویه‌های دیجی‌کالا)</span>
+  <div class="stats">
+    <div class="stat"><b class="c-warning">{{ v.money.invoices_unpaid | toman }}</b><span>صورتحساب پرداخت‌نشده</span></div>
+    <div class="stat"><b class="c-success">{{ v.money.invoices_paid | toman }}</b><span>صورتحساب پرداخت‌شده</span></div>
+    <div class="stat"><b>{{ v.money.payouts_pending | toman }}</b><span>تسویه در راه</span></div>
+  </div>
+</section>
+
+<section class="card pad gap12" aria-labelledby="bot">
+  <span class="lbl" id="bot">ربات قیمت ({{ v.rules | length | fa }} قانون)</span>
+  {% if v.rules %}<ul class="audit">{% for r, var, st in v.rules %}
+    <li><span>{{ var.title or var.digikala_variant_id }}</span>
+      <span class="sub">{{ 'روشن' if r.enabled else 'خاموش' }} · {{ st }} · سقف {{ r.max_toman | toman if r.max_toman else 'ندارد' }}</span></li>
+  {% endfor %}</ul>{% else %}<p class="sub">هنوز قانونی نگذاشته‌اید (دستور reprice-rule).</p>{% endif %}
+  {% if v.actions %}<span class="lbl">آخرین تصمیم‌ها</span><ul class="audit">{% for a, var in v.actions %}
+    <li><span>{{ var.title or var.digikala_variant_id }}</span>
+      <span class="sub">{{ (a.old_price // 10) | toman if a.old_price else '—' }} ← {{ (a.new_price // 10) | toman if a.new_price else 'بدون تغییر' }} · {{ a.reason }} · {{ a.ts | ago }}</span></li>
+  {% endfor %}</ul>{% endif %}
+</section>
+
+<section class="card pad gap12" aria-labelledby="low">
+  <span class="lbl" id="low">موجودی کم ({{ v.low | length | fa }})</span>
+  {% if v.low %}<ul class="audit">{% for i in v.low %}<li><span>{{ i.title or i.product_variant_id }}</span><span class="sub">قابل فروش: {{ i.available | fa }}</span></li>{% endfor %}</ul>
+  {% else %}<p class="sub">کالای کم‌موجودی نیست (یا هنوز inventory-sync اجرا نشده).</p>{% endif %}
+</section>
+
+<section class="card pad gap12" aria-labelledby="sbs">
+  <span class="lbl" id="sbs">سفارش‌های ارسال فروشنده ({{ v.shipments | length | fa }})</span>
+  {% if v.shipments %}<ul class="audit">{% for sh in v.shipments %}
+    <li><span>مرسوله {{ sh.shipment_id | fa }} · {{ sh.status_fa or sh.status or '' }}</span>
+      <span class="sub">تعهد: {{ sh.promise_date or '—' }} · کد رهگیری: {{ sh.tracking_code or 'ندارد' }} · {{ sh.item_count | fa }} قلم</span></li>
+  {% endfor %}</ul>{% else %}<p class="sub">سفارشی نیست (یا هنوز sbs-sync اجرا نشده).</p>{% endif %}
+</section>
+
+<section class="card pad gap12" aria-labelledby="promo">
+  <span class="lbl" id="promo">پروموشن‌ها</span>
+  {% if v.promotions %}<ul class="audit">{% for p in v.promotions %}
+    <li><span>{{ p.title or p.id }}</span><span class="sub">{{ p.nature or '' }} · {{ p.status or '' }} · {{ p.start_at or '' }} تا {{ p.end_at or '' }}</span></li>
+  {% endfor %}</ul>{% else %}<p class="sub">هنوز promo-sync اجرا نشده.</p>{% endif %}
+</section>
+
+<section class="card pad gap12" aria-labelledby="wl">
+  <span class="lbl" id="wl">آخرین نوشتن‌ها در دیجی‌کالا</span>
+  {% if v.writes %}<ul class="audit">{% for w in v.writes %}
+    <li><span>{{ w.op }} · {{ w.target or '' }}</span><span class="sub">{{ 'آزمایشی' if w.mode == 'dry_run' else 'واقعی' }} · {{ 'موفق' if w.ok else 'ناموفق' }} {{ w.error or '' }} · {{ w.ts | ago }}</span></li>
+  {% endfor %}</ul>{% else %}<p class="sub">هنوز چیزی نوشته نشده.</p>{% endif %}
+</section>
+{% endblock %}

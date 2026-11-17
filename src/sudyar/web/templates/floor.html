@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>کف قیمت</h1><p class="sub">زیر این قیمت، فروش برای شما سود ندارد</p></div>
+{% if view.commission_notice %}<div class="notice danger" role="alert"><b>کمیسیون‌ها مشکل دارند</b>{{ view.commission_notice }}</div>{% endif %}
+{% if view.missing_cost %}
+<div class="notice warning">برای {{ view.missing_cost | fa }} کالا قیمت خرید ثبت نشده؛ کف قیمت «ناقص» است و حدس زده نمی‌شود.</div>
+{% endif %}
+<div class="stats">
+  <div class="stat"><b class="c-success">{{ view.counts.get('ok', 0) | fa }}</b><span>کف آماده</span></div>
+  <div class="stat"><b class="c-warning">{{ (view.total - view.counts.get('ok', 0)) | fa }}</b><span>نیازمند ورودی</span></div>
+  <div class="stat"><b>{{ view.total | fa }}</b><span>کل کالاها</span></div>
+</div>
+{% include "_floor_main.html" %}
+<p class="muted">برای ثبت قیمت خرید از اکسل، دکمه‌ی «۴» را در پوشه‌ی برنامه بزنید.</p>
+{% endblock %}

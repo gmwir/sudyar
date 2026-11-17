@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>تنظیمات</h1><p class="sub">امیران یدک</p></div>
+
+<section class="card" aria-labelledby="conn-title">
+  <div class="scope">
+    <span class="chip {% if c.overall == 'ok' %}success{% elif c.overall in ('expired', 'missing') %}danger{% elif c.overall == 'partial' %}warning{% else %}neutral{% endif %}">
+      {% if c.overall == 'ok' %}متصل{% elif c.overall == 'expired' %}منقضی{% elif c.overall == 'missing' %}بدون توکن{% elif c.overall == 'partial' %}ناقص{% else %}نامشخص{% endif %}</span>
+    <div class="col"><div id="conn-title">اتصال دیجی‌کالا</div><p class="sub">{{ c.overall_text }}</p></div>
+  </div>
+  {% for sc in c.scopes %}
+  <div class="scope">
+    <span class="chip {% if sc.state == 'ok' %}success{% elif sc.state in ('denied', 'expired') %}danger{% elif sc.state == 'error' %}warning{% else %}neutral{% endif %}">{% if sc.state == 'ok' %}درست{% elif sc.state == 'denied' %}بسته{% elif sc.state == 'expired' %}منقضی{% elif sc.state == 'error' %}خطا{% else %}؟{% endif %}</span>
+    <div class="col"><div class="small">{{ sc.label }}</div><p class="sub">{{ sc.text }}{% if sc.when %} · {{ sc.when | ago }}{% endif %}</p></div>
+  </div>
+  {% endfor %}
+</section>
+
+<a class="card scope" href="/connect">
+  <span class="chip neutral">سرویس‌هاب</span>
+  <div class="col"><div>اتصال فروشگاه با تأیید فروشنده</div><p class="sub">ورود از راه سرویس‌هاب دیجی‌کالا (به‌جای Self Token)</p></div>
+</a>
+
+<a class="card scope" href="/anbar/">
+  <span class="chip neutral">انبار</span>
+  <div class="col"><div>انبار و حسابداری فروشگاه</div><p class="sub">اپ انبار امیران یدک: موجودی، فروش، فاکتور و حساب مشتریان (روی همین دستگاه ذخیره می‌شود)</p></div>
+</a>
+
+<div class="card scope">
+  <span class="chip success">همیشه</span>
+  <div class="col"><div>حالت فقط‌خواندنی</div><p class="sub">هیچ قیمت یا موجودی‌ای در دیجی‌کالا تغییر نمی‌کند.</p></div>
+</div>
+
+{% include "_alerts_card.html" %}
+
+<p class="muted">توکن‌ها هرگز در برنامه نمایش داده نمی‌شوند.</p>
+{% if auth_enabled %}
+<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn secondary" type="submit">خروج</button></form>
+{% endif %}
+{% endblock %}

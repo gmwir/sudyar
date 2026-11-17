@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>انبار امیران یدک</title>
+<meta name="description" content="مدیریت موجودی، فروش و حساب مشتریان امیران یدک — آفلاین روی آیفون">
+<meta name="theme-color" content="#1d3b53">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="امیران یدک">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="preload" href="Vazirmatn-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="topbar"><button class="tb-btn" id="tb-back" hidden aria-label="بازگشت">&#x2192;</button><h1 id="tb-title">امیران یدک</h1><span id="tb-act"></span></header>
+<main id="view"><div class="empty">در حال بارگذاری…</div></main>
+<nav id="tabbar" hidden></nav>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="scanner" hidden>
+  <video id="sc-video" playsinline muted autoplay></video>
+  <div class="sc-top"><button class="sc-btn" id="sc-close">پایان</button><div class="sc-mid"><b id="sc-title">اسکن</b><span id="sc-count" hidden></span></div><button class="sc-btn" id="sc-torch" hidden>چراغ</button></div>
+  <div id="sc-debug" hidden></div>
+  <div class="sc-frame"></div>
+  <div class="sc-line" id="sc-line"></div>
+  <div class="sc-hint" id="sc-hint">کد را داخل کادر و در فاصله ۱۵ تا ۲۵ سانتی‌متری نگه دارید</div>
+  <div class="sc-bottom" id="sc-bottom">
+    <label class="sc-btn" style="display:inline-flex;align-items:center">عکس (بارکد یا نام)<input type="file" accept="image/*" capture="environment" id="sc-photo" hidden></label>
+    <button class="sc-btn" id="sc-manual">ورود دستی</button>
+    <button class="sc-btn" id="sc-search">جستجو</button>
+    <button class="sc-btn" id="sc-mode" hidden>حالت</button>
+  </div>
+  <div id="sc-slot"></div>
+</div>
+<noscript>برای اجرای برنامه، جاوااسکریپت باید فعال باشد.</noscript>
+<script src="jsQR.js"></script>
+<script src="jalali.js"></script>
+<script src="qr.js"></script>
+<script src="core.js"></script>
+<script src="db.js"></script>
+<script src="backup.js"></script>
+<script src="barcode1d.js"></script>
+<script src="scan.js"></script>
+<script src="match.js"></script>
+<script src="classify.js"></script>
+<script src="vision.js"></script>
+<script src="xlsx.js"></script>
+<script src="pdf.js"></script>
+<script src="ui.js"></script>
+<script src="analytics.js"></script>
+<script src="reports.js"></script>
+<script src="reports2.js"></script>
+<script src="app.js"></script>
+<script src="views2.js"></script>
+<script src="catalog.js"></script>
+<script src="safety.js"></script>
+<script src="aiexport.js"></script>
+<script src="reportsui.js"></script>
+<script src="period.js"></script>
+<script src="purchase.js"></script>
+<script src="invreader.js"></script>
+<script src="pricelist.js"></script>
+<script src="groups.js"></script>
+<script src="studioexport.js"></script>
+<script src="saleslist.js"></script>
+<script src="partydeals.js"></script>
+<script src="quotes.js"></script>
+<script src="grouptree.js"></script>
+<script src="pricecheck.js"></script>
+<script src="daybook.js"></script>
+<script src="bizmonth.js"></script>
+</body>
+</html>

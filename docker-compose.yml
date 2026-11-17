@@ -1,0 +1,75 @@
+# Hardened app containers: non-root (10001), read-only root filesystem, no extra Linux powers,
+# memory/CPU limits. The only writable places are /tmp (memory) and ./data (your files).
+x-app: &app
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    POSTGRES_HOST: db
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 512m
+  cpus: 1.0
+  volumes:
+    - ./data:/data
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sudyar}
+      POSTGRES_DB: ${POSTGRES_DB:-sudyar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sudyar}"]
+      interval: 5s
+      retries: 10
+
+  worker:
+    <<: *app
+
+  # Buy Box radar. DISABLED until you enable it:  docker compose --profile radar up -d
+  radar:
+    <<: *app
+    profiles: ["radar"]
+    command: ["sh", "-c", "until alembic upgrade head; do sleep 5; done; python -m sudyar radar-run"]
+
+  # Pricing bot (Part 6). DISABLED until you enable it:  docker compose --profile bot up -d
+  # It only SENDS prices when WRITE_MODE=live in .env (default off = decisions are only recorded).
+  bot:
+    <<: *app
+    profiles: ["bot"]
+    command: ["sh", "-c", "until alembic upgrade head; do sleep 5; done; python -m sudyar reprice-run"]
+
+  # Persian web UI. Reachable ONLY from this computer: the port is published on the host's 127.0.0.1.
+  web:
+    <<: *app
+    command: ["sh", "-c", "until alembic upgrade head; do sleep 5; done; python -m sudyar web --host 0.0.0.0 --port 8080"]
+    environment:
+      POSTGRES_HOST: db
+      WEB_ALLOW_CONTAINER_BIND: "1"   # the process listens on 0.0.0.0 inside the container; the host side is 127.0.0.1 only
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  pgdata:
