@@ -29,7 +29,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-sudyar = ["web/templates/*.html", "web/static/*", "web/static/**/*"]
+sudyar = ["web/templates/*.html", "web/static/*", "web/static/**/*", "web/anbar/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

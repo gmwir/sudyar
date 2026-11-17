@@ -38,6 +38,12 @@ TABS = (("today", "امروز", "/"), ("radar", "رادار", "/radar"), ("floor
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 
+# The inventory/accounting module (static PWA under /anbar/) builds some styles at runtime, runs a barcode-scanner
+# worker, and its optional invoice reader calls the Anthropic API with the user's own key from the browser.
+ANBAR_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+             "font-src 'self'; connect-src 'self' https://api.anthropic.com; manifest-src 'self'; worker-src 'self' blob:; "
+             "media-src 'self' blob:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+
 
 class _TooBig(Exception):
     pass
@@ -256,6 +262,20 @@ def create_app(settings: Settings | None = None, session_factory: sessionmaker[S
     def service_worker():
         return FileResponse(HERE / "static" / "sw.js", media_type="text/javascript",
                             headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+
+    # ------------------------------------------------------------------ inventory & accounting module (existing app, reused as-is)
+    anbar_dir = (HERE / "anbar").resolve()
+
+    @app.get("/anbar", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def anbar_root():
+        return RedirectResponse("/anbar/", status_code=307)
+
+    @app.get("/anbar/{path:path}", dependencies=[Depends(require_auth)], include_in_schema=False)
+    def anbar_file(path: str = ""):
+        target = (anbar_dir / (path or "index.html")).resolve()
+        if anbar_dir not in target.parents or not target.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(target, headers={"Content-Security-Policy": ANBAR_CSP, "Cache-Control": "no-cache"})
 
     @app.get("/login", include_in_schema=False)
     def login_page(request: Request):
