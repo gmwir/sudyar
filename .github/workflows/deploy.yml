@@ -1,0 +1,29 @@
+# Auto-deploy to the Sudyar server after a merge to main (or by hand: Actions > Deploy > Run workflow).
+# Does nothing until these repo Secrets exist: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+# Optional: DEPLOY_PATH (default /opt/sudyar), DEPLOY_PORT (default 22).
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HOST: ${{ secrets.DEPLOY_HOST }}
+      USER_NAME: ${{ secrets.DEPLOY_USER }}
+      KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DPATH: ${{ secrets.DEPLOY_PATH }}
+      DPORT: ${{ secrets.DEPLOY_PORT }}
+    steps:
+      - name: Skip when not configured
+        if: env.HOST == '' || env.USER_NAME == '' || env.KEY == ''
+        run: echo "Deploy secrets are not set; skipping."
+      - name: Deploy over SSH
+        if: env.HOST != '' && env.USER_NAME != '' && env.KEY != ''
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          ssh -i ~/.ssh/id_deploy -p "${DPORT:-22}" -o StrictHostKeyChecking=accept-new "$USER_NAME@$HOST" \
+            "set -e; cd '${DPATH:-/opt/sudyar}'; git pull --ff-only origin main; docker compose -f docker-compose.yml -f deploy/docker-compose.server.yml up -d --build"
