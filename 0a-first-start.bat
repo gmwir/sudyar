@@ -20,6 +20,7 @@ if errorlevel 1 (
 )
 echo Waiting 20 seconds for the database...
 timeout /t 20 /nobreak >nul
+docker compose exec worker alembic upgrade head
 docker compose exec worker python -m sudyar check-config
 echo.
 echo If you see "Configuration OK", run 9-orders-sync.bat next.
